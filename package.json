@@ -11,7 +11,8 @@
     "purgecss": "purgecss -c purgecss.config.js",
     "watch": "ng build --watch --configuration development",
     "test": "ng test",
-    "analyze": "webpack-bundle-analyzer dist/keep/stats.json"
+    "analyze": "webpack-bundle-analyzer dist/keep/stats.json",
+    "docker:deploy": "npx tsx ./deploy-docker-images.ts"
   },
   "private": true,
   "engines": {
