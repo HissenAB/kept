@@ -52,21 +52,6 @@ I wanted something that felt like Google Keep: fast, colorful, easy to glance at
 - Built-in database backups and restore flow.
 - Local user accounts, optional 2FA, and user management.
 
-## Easy Hosted Setup
-
-If you do not want to set up Docker or manage a server yourself, Railway can create a ready-to-use Kept instance for you in a few clicks.
-
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/kept-notes)
-
-Railway handles the technical setup:
-
-- Runs Kept for you
-- Keeps storage attached for your notes and attachments
-- Sets the required configuration
-- Gives you a public HTTPS link to open in your browser
-
-Once deployment finishes, open the link Railway gives you and create your first Kept account.
-
 ## Install With Docker
 
 Requirements:
@@ -85,6 +70,23 @@ docker compose up -d
 Open `http://localhost:6767` and create the first admin account.
 
 Kept stores its database, uploads, attachments, and generated server data in `./data`. Back that folder up if you are not using the built-in backup tools.
+
+## Easy Hosted Setup
+
+If you do not want to set up Docker or manage a server yourself, Railway can create a ready-to-use Kept instance for you in a few clicks.
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/kept-notes)
+
+Railway handles the technical setup:
+
+- Runs Kept for you
+- Keeps storage attached for your notes and attachments
+- Sets the required configuration
+- Gives you a public HTTPS link to open in your browser
+
+Once deployment finishes, open the link Railway gives you and create your first Kept account.
+
+This is provided as a less technical way to try Kept, not as an endorsement of Railway. Use whatever host you trust.
 
 ## Native iOS App
 

@@ -283,6 +283,11 @@ a:hover {
   display: block;
 }
 
+.hosted-setup-callout__note {
+  font-size: 0.92rem;
+  margin: 14px 0 0;
+}
+
 /* Code */
 code {
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
