@@ -23,6 +23,35 @@ Kept is a self-hosted notes app built for quick capture: text notes, checklists,
   </a>
 </p>
 
+## Install With Docker
+
+Requirements:
+
+- Docker with Compose
+- Git
+
+Kept's recommended install path uses the published Docker image: `ghcr.io/ericerkz/kept:latest`.
+
+```bash
+git clone https://github.com/ericerkz/kept.git
+cd kept
+docker compose up -d
+```
+
+Open `http://localhost:6767` and create the first admin account.
+
+Kept stores its database, uploads, attachments, and generated server data in `./data`. Back that folder up if you are not using the built-in backup tools.
+
+## Build It Yourself
+
+If you want to build from the local source instead of pulling the published image, use the dev compose override:
+
+```bash
+git clone https://github.com/ericerkz/kept.git
+cd kept
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+```
+
 ## Screenshot
 
 <img src="src/assets/images/ui-showcase.png" alt="Kept UI showing the sidebar, search, and a grid of colorful note cards">
@@ -68,35 +97,6 @@ I wanted something that felt like Google Keep: fast, colorful, easy to glance at
 The Kept web app can also be installed as a PWA on iOS and Android. For push notifications and reliable mobile installs, Kept needs to be served from a secure `https://` URL. Location-based reminders require the native iOS or Android app.
 
 The short setup guide is on the [Kept website](https://www.keepitkept.xyz/#pwa-mobile).
-
-## Install With Docker
-
-Requirements:
-
-- Docker with Compose
-- Git
-
-Kept's recommended install path uses the published Docker image: `ghcr.io/ericerkz/kept:latest`.
-
-```bash
-git clone https://github.com/ericerkz/kept.git
-cd kept
-docker compose up -d
-```
-
-Open `http://localhost:6767` and create the first admin account.
-
-Kept stores its database, uploads, attachments, and generated server data in `./data`. Back that folder up if you are not using the built-in backup tools.
-
-## Build It Yourself
-
-If you want to build from the local source instead of pulling the published image, use the dev compose override:
-
-```bash
-git clone https://github.com/ericerkz/kept.git
-cd kept
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
-```
 
 ## Reverse Proxy / HTTPS
 
@@ -202,6 +202,7 @@ Useful environment variables are documented in `docker-compose.yml`. The common 
 - `KEPT_CORS_ALLOW_ALL` / `KEPT_CORS_ORIGINS`: CORS behavior for remote clients and native shells.
 - `PUID` / `PGID`: run the container as a specific Linux user/group.
 - `KEPT_ALLOW_RESTORE`: temporarily enables restore from backup during setup.
+- `VAPID_SUBJECT`: optional public URL/contact identity for web push. Kept auto-generates VAPID keys if you do not set them; only set this if push notifications need a more explicit public origin.
 
 ## Development
 

@@ -262,7 +262,6 @@ server {
           <h3>Before you install</h3>
           <ul>
             <li>Put Kept behind a public <code>https://</code> domain. Mobile push will not work from plain HTTP or a raw local network address. Need help with certificates? See the Apache or Nginx Let's Encrypt tutorials linked above in the <a href="#reverse-proxy">Reverse proxy</a> section.</li>
-            <li>Set <code>VAPID_SUBJECT</code> to your Kept URL, for example <code>https://kept.example.com</code>. You can uncomment it in <code>docker-compose.yml</code>.</li>
           </ul>
 
           <h3>iPhone or iPad</h3>
@@ -285,6 +284,7 @@ server {
           <ul>
             <li>Check that the installed app is using your HTTPS domain.</li>
             <li>Confirm notifications are allowed in the browser or OS settings.</li>
+            <li>Kept auto-generates VAPID keys for web push. If push still fails behind a reverse proxy, set <code>VAPID_SUBJECT</code> in <code>docker-compose.yml</code> to your public Kept URL, for example <code>https://kept.example.com</code>.</li>
             <li>On iOS, remove and reinstall the Home Screen app after changing domains or VAPID settings.</li>
           </ul>
         </section>
