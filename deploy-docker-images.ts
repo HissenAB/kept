@@ -13,8 +13,8 @@ spawn(
   [
     "buildx",
     "build",
-    // "--platform", "linux/amd64,linux/arm64",
-    "--platform", "linux/amd64",
+    "--platform", "linux/amd64,linux/arm64",
+    //"--platform", "linux/amd64",
     "-t", `ghcr.io/ericerkz/kept:${major}.${minor}.${patch}`,
     "-t", `ghcr.io/ericerkz/kept:${major}.${minor}`,
     "-t", `ghcr.io/ericerkz/kept:${major}`,
