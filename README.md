@@ -53,7 +53,7 @@ Requirements:
 - Docker with Compose
 - Git
 
-Kept's recommended install path uses the published Docker image: `ghcr.io/ericerkz/kept:latest`.
+Kept's recommended install path is to use the published Docker image: `ghcr.io/ericerkz/kept:latest`.
 
 ```bash
 git clone https://github.com/ericerkz/kept.git
