@@ -267,6 +267,22 @@ a:hover {
   margin-top: 4px;
 }
 
+.hosted-setup-callout {
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin: 24px 0 16px;
+  padding: 20px;
+}
+
+.hosted-setup-callout h3 {
+  margin-top: 0;
+}
+
+.hosted-setup-callout img {
+  display: block;
+}
+
 /* Code */
 code {
   font-family: 'JetBrains Mono', 'Fira Code', monospace;

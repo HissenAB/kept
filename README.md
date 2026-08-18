@@ -18,11 +18,14 @@ Kept is a self-hosted notes app built for quick capture: text notes, checklists,
   <a href="https://play.google.com/store/apps/details?id=xyz.keepitkept.app">
     <img src="https://img.shields.io/badge/Google%20Play-Kept%20Notes-000000?logo=googleplay&logoColor=white" alt="Get Kept Notes on Google Play">
   </a>
-  <a href="https://railway.com/deploy/kept-notes">
-    <img src="https://railway.com/button.svg" alt="Deploy on Railway">
-  </a>
   <a href="https://ko-fi.com/kept_notes">
     <img src="https://img.shields.io/badge/Ko--fi-Support%20Me-ff5e5b?logo=ko-fi&logoColor=white" alt="Ko-fi">
+  </a>
+</p>
+
+<p>
+  <a href="https://railway.com/deploy/kept-notes">
+    <img src="https://railway.com/button.svg" alt="Deploy on Railway">
   </a>
 </p>
 
