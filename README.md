@@ -76,43 +76,26 @@ Requirements:
 - Docker with Compose
 - Git
 
+Kept's recommended install path uses the published Docker image: `ghcr.io/ericerkz/kept:latest`.
+
 ```bash
 git clone https://github.com/ericerkz/kept.git
 cd kept
-docker compose up -d --build
+docker compose up -d
 ```
 
 Open `http://localhost:6767` and create the first admin account.
 
 Kept stores its database, uploads, attachments, and generated server data in `./data`. Back that folder up if you are not using the built-in backup tools.
 
-## Native Install
+## Build It Yourself
 
-Docker is recommended, but Kept can also run directly on Node.js v24.x.
-
-Linux/macOS:
+If you want to build from the local source instead of pulling the published image, use the dev compose override:
 
 ```bash
-chmod +x install-native.sh
-sudo ./install-native.sh
-```
-
-Windows PowerShell, run as Administrator:
-
-```powershell
-.\install-native.ps1
-```
-
-Without the service setup, start the server manually:
-
-```bash
-PORT=6767 npm run api
-```
-
-On Windows:
-
-```powershell
-$env:PORT=6767; npm run api
+git clone https://github.com/ericerkz/kept.git
+cd kept
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 ```
 
 ## Reverse Proxy / HTTPS
@@ -204,8 +187,8 @@ The restore flag is intentionally opt-in so the restore endpoint is not left ope
 
 ```bash
 cd kept
-git pull
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 Your `./data` folder is not replaced by updates.

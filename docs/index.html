@@ -149,22 +149,20 @@
 
         <section id="quick-start">
           <h2>🚀 How to Install</h2>
-          <p>The easiest and most reliable way to run Kept is using Docker. It keeps everything self-contained and takes just a few minutes.</p>
+          <p>The easiest and most reliable way to run Kept is using the published Docker image, <code>ghcr.io/ericerkz/kept:latest</code>. It keeps everything self-contained and takes just a few minutes.</p>
           
           <pre><code>git clone https://github.com/ericerkz/kept.git
 cd kept
-docker compose up -d --build</code></pre>
+docker compose up -d</code></pre>
           
           <p>That's it! Open your browser and go to <code>http://localhost:6767</code>. You'll be greeted by a friendly setup wizard to create your admin account.</p>
           
           <details>
-            <summary>Prefer to install directly without Docker?</summary>
-            <p>If you have Node.js v24.x installed, you can run Kept natively using our automated scripts.</p>
-            <p><strong>For Linux/macOS:</strong></p>
-            <pre><code>chmod +x install-native.sh
-sudo ./install-native.sh</code></pre>
-            <p><strong>For Windows (Run as Administrator):</strong></p>
-            <pre><code>.\install-native.ps1</code></pre>
+            <summary>Prefer to build it yourself?</summary>
+            <p>If you want to build from the local source instead of pulling the published image, use the dev compose override.</p>
+            <pre><code>git clone https://github.com/ericerkz/kept.git
+cd kept
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build</code></pre>
           </details>
         </section>
 
@@ -264,7 +262,7 @@ server {
           <h3>Before you install</h3>
           <ul>
             <li>Put Kept behind a public <code>https://</code> domain. Mobile push will not work from plain HTTP or a raw local network address. Need help with certificates? See the Apache or Nginx Let's Encrypt tutorials linked above in the <a href="#reverse-proxy">Reverse proxy</a> section.</li>
-            <li>Set <code>VAPID_SUBJECT</code> to your Kept URL, for example <code>https://kept.example.com</code>. Docker users can uncomment it in <code>docker-compose.yml</code>; native installs can export it before starting the server.</li>
+            <li>Set <code>VAPID_SUBJECT</code> to your Kept URL, for example <code>https://kept.example.com</code>. You can uncomment it in <code>docker-compose.yml</code>.</li>
           </ul>
 
           <h3>iPhone or iPad</h3>
