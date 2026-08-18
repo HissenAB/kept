@@ -18,6 +18,9 @@ Kept is a self-hosted notes app built for quick capture: text notes, checklists,
   <a href="https://play.google.com/store/apps/details?id=xyz.keepitkept.app">
     <img src="https://img.shields.io/badge/Google%20Play-Kept%20Notes-000000?logo=googleplay&logoColor=white" alt="Get Kept Notes on Google Play">
   </a>
+  <a href="https://railway.com/deploy/kept-notes">
+    <img src="https://railway.com/button.svg" alt="Deploy on Railway">
+  </a>
   <a href="https://ko-fi.com/kept_notes">
     <img src="https://img.shields.io/badge/Ko--fi-Support%20Me-ff5e5b?logo=ko-fi&logoColor=white" alt="Ko-fi">
   </a>
@@ -45,6 +48,21 @@ I wanted something that felt like Google Keep: fast, colorful, easy to glance at
 - Google Keep Takeout data import.
 - Built-in database backups and restore flow.
 - Local user accounts, optional 2FA, and user management.
+
+## Easy Hosted Setup
+
+If you do not want to set up Docker or manage a server yourself, Railway can create a ready-to-use Kept instance for you in a few clicks.
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/kept-notes)
+
+Railway handles the technical setup:
+
+- Runs Kept for you
+- Keeps storage attached for your notes and attachments
+- Sets the required configuration
+- Gives you a public HTTPS link to open in your browser
+
+Once deployment finishes, open the link Railway gives you and create your first Kept account.
 
 ## Install With Docker
 
