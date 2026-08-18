@@ -1,8 +1,6 @@
 services:
   kept:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/ericerkz/kept:latest
     container_name: kept-app
     ports:
       - "6767:6767"
