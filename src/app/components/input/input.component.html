@@ -787,6 +787,8 @@
         <div class="cbox-note-container">
           <div #cboxInput [attr.data-cbox-last]="last" [attr.data-cbox-id]="cb.id" [class.cbox-done]="cb.done"
             (input)="onCboxInput(cb.id)" (blur)="cboxTools(cb.id).update(cboxInput)" (keydown)="cBoxKeyDown($event,cb.id)"
+            (touchstart)="cboxTextTouchStart($event, cb.id, cboxInput)" (touchmove)="cboxTextTouchMove($event, cb.id, cboxInput)"
+            (touchcancel)="cboxTextTouchCancel(cb.id, cboxInput)"
             (focus)="cboxInputFocus($event)" (touchend)="focusCboxFromTouch($event, cb.id, cboxInput)"
             class="cbox-note" contenteditable="true" spellcheck="true" autocomplete="off" autocorrect="off" autocapitalize="sentences" inputmode="text" [innerHTML]="cb.data">
           </div>

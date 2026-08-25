@@ -87,7 +87,9 @@ export class SharedService {
   }
 
   closeSideBar = new Subject<boolean>()
+  closeSideBarIfOpen = new Subject<boolean>()
   openMobileComposer = new Subject<boolean>()
+  closeMobileComposer = new Subject<boolean>()
   openSelectedReminder = new Subject<void>()
   saveNote = new Subject<boolean>()
   closeModal = new Subject<boolean>()

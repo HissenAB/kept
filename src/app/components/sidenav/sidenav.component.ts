@@ -138,6 +138,15 @@ export class NavComponent implements OnInit, AfterViewInit, OnDestroy {
     }
   }
 
+  closeSideBarIfOpen() {
+    if (!this.usesDrawerSidebar()) return
+    const sidebar = document.querySelector('[sideBar]')
+    if (sidebar && !sidebar.classList.contains('close')) {
+      sidebar.classList.add('close')
+      this.isMobileOpen = false
+    }
+  }
+
   onNavItemClick() {
     if (!this.usesDrawerSidebar()) return
     const sidebar = document.querySelector('[sideBar]')
@@ -173,7 +182,8 @@ export class NavComponent implements OnInit, AfterViewInit, OnDestroy {
 
   ngOnInit(): void {
     this.subscriptions.push(
-      this.Shared.closeSideBar.subscribe(x => { if (x) this.collapseSideBar() })
+      this.Shared.closeSideBar.subscribe(x => { if (x) this.collapseSideBar() }),
+      this.Shared.closeSideBarIfOpen.subscribe(x => { if (x) this.closeSideBarIfOpen() })
     );
     if (this.usesDrawerSidebar()) {
       const sidebar = document.querySelector('[sideBar]');

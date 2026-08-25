@@ -194,6 +194,7 @@ export class InputComponent implements OnInit {
   private cboxTouchStartX = 0;
   private cboxTouchStartY = 0;
   private pendingCboxFocusPoint?: { id: number, x: number, y: number };
+  private cboxTextTouch?: { id: number, x: number, y: number, moved: boolean, wasFocused: boolean, disabledEditing: boolean };
   private lastCboxTouchToggleAt = 0;
   activePointers: Map<number, { x: number, y: number }> = new Map();
   drawingTransform = { scale: 1, x: 0, y: 0 };
@@ -208,6 +209,7 @@ export class InputComponent implements OnInit {
   coEditSubscription?: Subscription;
   notesListSubscription?: Subscription;
   mobileComposerSubscription?: Subscription;
+  closeMobileComposerSubscription?: Subscription;
   private coEditSaveInFlight = false;
   private coEditSaveQueued = false;
   private lastBodyRange?: Range
@@ -1211,9 +1213,56 @@ export class InputComponent implements OnInit {
     }, 0)
   }
 
+  cboxTextTouchStart(event: TouchEvent, id: number, el: HTMLDivElement) {
+    const touch = event.touches[0]
+    if (!touch) return
+    const wasFocused = document.activeElement === el
+    if (!wasFocused) el.contentEditable = 'false'
+    this.cboxTextTouch = {
+      id,
+      x: touch.clientX,
+      y: touch.clientY,
+      moved: false,
+      wasFocused,
+      disabledEditing: !wasFocused
+    }
+  }
+
+  cboxTextTouchMove(event: TouchEvent, id: number, el: HTMLDivElement) {
+    const touch = event.touches[0]
+    const start = this.cboxTextTouch
+    if (!touch || !start || start.id !== id) return
+    const dx = Math.abs(touch.clientX - start.x)
+    const dy = Math.abs(touch.clientY - start.y)
+    if (dx <= 10 && dy <= 10) return
+
+    start.moved = true
+    this.pendingCboxFocusPoint = undefined
+    if (!start.wasFocused && document.activeElement === el) el.blur()
+  }
+
+  cboxTextTouchCancel(id: number, el: HTMLDivElement) {
+    if (this.cboxTextTouch?.id === id) {
+      if (this.cboxTextTouch.disabledEditing) el.contentEditable = 'true'
+      this.cboxTextTouch = undefined
+    }
+  }
+
   focusCboxFromTouch(event: TouchEvent, id: number, el: HTMLDivElement) {
     const touch = event.changedTouches[0]
     if (!touch) return
+    const start = this.cboxTextTouch
+    this.cboxTextTouch = undefined
+    if (!start || start.id !== id) return
+    if (start.disabledEditing) el.contentEditable = 'true'
+    const dx = Math.abs(touch.clientX - start.x)
+    const dy = Math.abs(touch.clientY - start.y)
+    if (start.moved || dx > 10 || dy > 10) {
+      this.pendingCboxFocusPoint = undefined
+      if (!start.wasFocused && document.activeElement === el) el.blur()
+      return
+    }
+
     this.pendingCboxFocusPoint = { id, x: touch.clientX, y: touch.clientY }
     if (document.activeElement !== el) {
       el.focus({ preventScroll: true })
@@ -2854,6 +2903,9 @@ export class InputComponent implements OnInit {
     this.mobileComposerSubscription = this.Shared.openMobileComposer.subscribe(open => {
       if (open) this.openMobileComposer()
     })
+    this.closeMobileComposerSubscription = this.Shared.closeMobileComposer.subscribe(close => {
+      if (close && this.mobileComposeMode && !this.isEditing) this.mobileBack()
+    })
     if (this.isEditing) { this.saveNoteSubscription = this.Shared.saveNote.subscribe(x => { if (x) this.saveNote() }) }
     if (this.isEditing && this.noteToEdit.id) {
       this.notesService.joinNote(this.noteToEdit.id);
@@ -2994,6 +3046,7 @@ export class InputComponent implements OnInit {
     this.notesListSubscription?.unsubscribe();
     this.autoSaveSubscription?.unsubscribe();
     this.mobileComposerSubscription?.unsubscribe();
+    this.closeMobileComposerSubscription?.unsubscribe();
     this.unbindKeyboardOffset();
     this.unbindAndroidBackgroundLocationResume();
     this.unlockBodyScroll();
