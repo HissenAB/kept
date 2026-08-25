@@ -8,12 +8,14 @@ import { bgColors, bgImages } from '../interfaces/tooltip';
 import { AuthService } from './auth.service';
 import { ReminderService } from './reminder.service';
 import { createPopper, type Placement } from '@popperjs/core';
+import { environment } from 'src/environments/environment';
 declare var Snackbar: any
 @Injectable({
   providedIn: 'root'
 })
 export class SharedService {
   private tooltipOutsideListeners = new WeakMap<HTMLDivElement, (event: Event) => void>();
+  private readonly binderStorageKey = 'kept_binders_v1';
 
   // PWA State
   deferredInstallPrompt?: any;
@@ -23,6 +25,7 @@ export class SharedService {
   showInstallButton = new BehaviorSubject<boolean>(false);
 
   private creatingExamples = false;
+  private serverLabels: LabelI[] = [];
 
   constructor(
     private Notes: NotesService,
@@ -37,7 +40,10 @@ export class SharedService {
     // load. Without this, the constructor-time load runs before the
     // session is ready and the page stays blank until manual refresh.
     this.Labels.labelsList$.subscribe({
-      next: (result: LabelI[]) => this.label.list = [...result].reverse(),
+      next: (result: LabelI[]) => {
+        this.serverLabels = result || [];
+        this.refreshLabelList();
+      },
       error: error => console.error(error)
     })
     this.Notes.notesList$.subscribe({
@@ -48,6 +54,8 @@ export class SharedService {
           this.note.pinned = ordered.filter(x => x.pinned === true)
           this.note.unpinned = ordered.filter(x => x.pinned === false)
           this.note.all = ordered
+          this.refreshLabelList();
+          this.refreshBinderList();
         })
       },
       error: error => console.error(error)
@@ -71,6 +79,9 @@ export class SharedService {
         this.note.pinned = []
         this.note.unpinned = []
         this.note.all = []
+        this.serverLabels = []
+        this.label.list = []
+        this.binder.list = []
       }
     })
   }
@@ -82,6 +93,7 @@ export class SharedService {
   closeModal = new Subject<boolean>()
   noteViewType = new BehaviorSubject<'list' | 'grid'>('grid')
   selectedNoteIds = new BehaviorSubject<number[]>([])
+  searchScope = new BehaviorSubject<'all' | 'current'>(this.initialSearchScope())
   searchQuery = ''
 
   initPwa() {
@@ -125,6 +137,19 @@ export class SharedService {
     this.Notes.setSearchQuery(query)
   }
 
+  setSearchScope(scope: 'all' | 'current') {
+    this.searchScope.next(scope)
+    try { localStorage.setItem('kept_search_scope', scope); } catch {}
+  }
+
+  private initialSearchScope(): 'all' | 'current' {
+    try {
+      return localStorage.getItem('kept_search_scope') === 'current' ? 'current' : 'all'
+    } catch {
+      return 'all'
+    }
+  }
+
   async refreshData() {
     await Promise.all([
       this.Notes.load(),
@@ -139,6 +164,82 @@ export class SharedService {
 
   clearNoteSelection() {
     this.selectedNoteIds.next([])
+  }
+
+  private refreshLabelList() {
+    const labels: LabelI[] = [];
+    const seen = new Set<string>();
+
+    for (const label of [...this.serverLabels].reverse()) {
+      this.addLabelIfMissing(labels, seen, label);
+    }
+
+    const derivedLabels = (this.note.all || [])
+      .flatMap(note => note.labels || [])
+      .filter(label => label?.added !== false)
+      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
+
+    for (const label of derivedLabels) {
+      this.addLabelIfMissing(labels, seen, label);
+    }
+
+    this.label.list = labels;
+  }
+
+  private addLabelIfMissing(target: LabelI[], seen: Set<string>, label?: LabelI) {
+    const name = String(label?.name || '').trim();
+    if (!name) return;
+    const key = name.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    target.push({ id: label?.id, name });
+  }
+
+  private binderStoragePartition() {
+    const server = environment.apiUrl || location.origin;
+    const userId = this.auth.currentUser?.id || 'anon';
+    return `${this.binderStorageKey}:${server}:${userId}`;
+  }
+
+  private storedBinders(): string[] {
+    try {
+      const raw = localStorage.getItem(this.binderStoragePartition());
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.map(item => String(item || '').trim()).filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private saveStoredBinders(names: string[]) {
+    const unique: string[] = [];
+    const seen = new Set<string>();
+    for (const name of names.map(item => String(item || '').trim()).filter(Boolean)) {
+      const key = name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(name);
+    }
+    try { localStorage.setItem(this.binderStoragePartition(), JSON.stringify(unique)); } catch {}
+  }
+
+  refreshBinderList() {
+    const names = [
+      ...this.storedBinders(),
+      ...(this.note.all || []).map(note => note.binder || '').filter(Boolean)
+    ];
+    const unique: { name: string }[] = [];
+    const seen = new Set<string>();
+    for (const name of names) {
+      const clean = String(name || '').trim();
+      if (!clean) continue;
+      const key = clean.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push({ name: clean });
+    }
+    unique.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+    this.binder.list = unique;
   }
 
   isNoteSelected(noteId?: number) {
@@ -190,6 +291,15 @@ export class SharedService {
         labels = labels.filter(noteLabel => noteLabel.id !== label.id)
       }
       await this.Notes.updateKey({ labels }, note.id!)
+    }
+  }
+
+  async bulkApplyBinder(name: string) {
+    const binder = String(name || '').trim();
+    if (binder) await this.binder.db.add(binder);
+    const selected = this.note.all.filter(note => note.id && this.selectedNoteIds.value.includes(note.id));
+    for (const note of selected) {
+      await this.Notes.updateKey({ binder }, note.id!);
     }
   }
 
@@ -392,6 +502,41 @@ export class SharedService {
       update: (data: LabelI) => this.Labels.update(data, this.label.id),
       delete: () => this.Labels.delete(this.label.id),
       updateAllLabels: (value: any) => this.note.db.updateAllLabels(this.label.id, value),
+    }
+  }
+
+  binder = {
+    list: [] as { name: string }[],
+    db: {
+      add: async (name: string) => {
+        const clean = String(name || '').trim();
+        if (!clean) return;
+        const names = this.storedBinders();
+        if (!names.some(item => item.toLowerCase() === clean.toLowerCase())) {
+          this.saveStoredBinders([...names, clean]);
+        }
+        this.refreshBinderList();
+      },
+      update: async (oldName: string, newName: string) => {
+        const oldClean = String(oldName || '').trim();
+        const newClean = String(newName || '').trim();
+        if (!oldClean || !newClean) return;
+        const names = this.storedBinders().map(item => item.toLowerCase() === oldClean.toLowerCase() ? newClean : item);
+        this.saveStoredBinders(names);
+        for (const note of this.note.all.filter(note => (note.binder || '').toLowerCase() === oldClean.toLowerCase())) {
+          if (note.id) await this.Notes.updateKey({ binder: newClean }, note.id);
+        }
+        this.refreshBinderList();
+      },
+      delete: async (name: string) => {
+        const clean = String(name || '').trim();
+        if (!clean) return;
+        this.saveStoredBinders(this.storedBinders().filter(item => item.toLowerCase() !== clean.toLowerCase()));
+        for (const note of this.note.all.filter(note => (note.binder || '').toLowerCase() === clean.toLowerCase())) {
+          if (note.id) await this.Notes.updateKey({ binder: '' }, note.id);
+        }
+        this.refreshBinderList();
+      }
     }
   }
 

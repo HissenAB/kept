@@ -1,4 +1,11 @@
 export type ReminderStatus = 'pending' | 'fired' | 'dismissed' | 'snoozed';
+export type ReminderRepeatType = 'none' | 'daily' | 'weekly' | 'monthly' | 'custom_days';
+
+export interface ReminderRepeatRule {
+  type: ReminderRepeatType;
+  intervalDays?: number;
+  moveToTopOnTrigger?: boolean;
+}
 
 export interface ReminderI {
   id: number;

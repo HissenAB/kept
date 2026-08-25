@@ -17,6 +17,10 @@ export class NavComponent implements OnInit, AfterViewInit, OnDestroy {
   @ViewChild("modal") modal !: ElementRef<HTMLInputElement>
   @ViewChild("labelInput") labelInput !: ElementRef<HTMLInputElement>
   @ViewChild("labelError") labelError !: ElementRef<HTMLInputElement>
+  @ViewChild("binderModalContainer") binderModalContainer !: ElementRef<HTMLInputElement>
+  @ViewChild("binderModal") binderModal !: ElementRef<HTMLInputElement>
+  @ViewChild("binderInput") binderInput !: ElementRef<HTMLInputElement>
+  @ViewChild("binderError") binderError !: ElementRef<HTMLInputElement>
   @ViewChild('labelsScroll') labelsScroll?: ElementRef<HTMLDivElement>
 
   isMobileOpen = false;
@@ -73,6 +77,45 @@ export class NavComponent implements OnInit, AfterViewInit, OnDestroy {
       }
     }
     return actions
+  }
+
+  openBinderModal() {
+    this.binderModalContainer.nativeElement.style.display = 'block';
+    document.addEventListener('mousedown', this.binderMouseDownEvent)
+  }
+
+  hideBinderModal() {
+    this.binderModalContainer.nativeElement.style.display = 'none'
+    document.removeEventListener('mousedown', this.binderMouseDownEvent)
+  }
+
+  binderMouseDownEvent = (event: Event) => {
+    let modalEl = this.binderModal.nativeElement
+    if (!(modalEl as any).contains(event.target)) {
+      this.hideBinderModal()
+    }
+  }
+
+  addBinder(el: HTMLInputElement) {
+    if (!el) return
+    const name = el.value.trim()
+    if (!name) return
+    const exists = this.Shared.binder.list.some(binder => binder.name.toLowerCase() === name.toLowerCase())
+    if (exists) {
+      this.binderError.nativeElement.hidden = false
+      el.focus()
+      return
+    }
+    this.Shared.binder.db.add(name)
+      .then(() => { this.binderError.nativeElement.hidden = true; el.value = ''; el.focus() })
+      .catch(() => { this.binderError.nativeElement.hidden = false; el.focus() })
+  }
+
+  editBinder(name: string) {
+    return {
+      delete: () => this.Shared.binder.db.delete(name),
+      update: (value: string) => this.Shared.binder.db.update(name, value)
+    }
   }
 
   compactLabel(name: string) {

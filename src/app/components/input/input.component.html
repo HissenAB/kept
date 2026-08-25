@@ -154,6 +154,14 @@
         </button>
         <span class="spacer"></span>
         <div class="mobile-top-icons">
+          <button type="button" class="mobile-icon history" aria-label="Undo"
+            (pointerdown)="runTextHistory('undo',$event)">
+            <span class="material-symbols-outlined">undo</span>
+          </button>
+          <button type="button" class="mobile-icon history" aria-label="Redo"
+            (pointerdown)="runTextHistory('redo',$event)">
+            <span class="material-symbols-outlined">redo</span>
+          </button>
           <div [class.pinned]="notePin.dataset['pinned'] === 'true'" class="mobile-icon pin" (click)="togglePinned()">
             <span class="material-symbols-outlined">{{notePin.dataset['pinned'] === 'true' ? 'push_pin' : 'push_pin'}}</span>
           </div>
@@ -177,7 +185,7 @@
       <ng-container [ngTemplateOutlet]="imagesTemplate" [ngTemplateOutletContext]="{ placement: 'top' }">
       </ng-container>
       <div [hidden]="noteTitle.innerHTML.length" class="note-title ph"> Title</div>
-      <div #noteTitle (input)="onNoteTitleInput()" (paste)="pasteEvent($event)"
+      <div #noteTitle (input)="onNoteTitleInput()" (paste)="pasteEvent($event)" (focus)="rememberTextHistoryTarget(noteTitle)"
         class="note-title" contenteditable="true" spellcheck="true" autocomplete="off" autocorrect="off" autocapitalize="sentences" inputmode="text">
       </div>
       <!--? note OR checkboxes (or both, in the case of merged hybrid notes) -->
@@ -222,7 +230,7 @@
   <!--? icons -->
   @if (!isTrashed && !isDrawingNote) {
     <div class="icons-container">
-      @if (showTextFormatting && !isCbox.value) {
+      @if (showTextFormatting && canFormatText()) {
         <div class="text-format-toolbar" (mousedown)="$event.preventDefault()" (click)="$event.stopPropagation()">
           <button type="button" (mousedown)="applyTextFormat('h1',$event)">H1</button>
           <button type="button" (mousedown)="applyTextFormat('h2',$event)">H2</button>
@@ -236,7 +244,7 @@
       }
       <div class="icons">
         <button type="button" class="text-format-trigger H pop" data-pop="Formatting options"
-          [class.active]="showTextFormatting" [disabled]="isCbox.value" (click)="toggleTextFormatting($event)">A</button>
+          [class.active]="showTextFormatting" [disabled]="!canFormatText()" (click)="toggleTextFormatting($event)">A</button>
         <div class="alarm H pop" data-pop="Remind me"
           [class.alarm-active]="!!getActiveReminder()"
           (click)="alarmIconTapped($event)">
@@ -253,8 +261,10 @@
           [attr.data-pop]="isArchived ? 'Unarchive' : 'Archive'"></div>
         <div #moreMenuTtBtn class="more H pop" data-pop="More" (click)="openTooltip(moreMenuTtBtn,moreMenuTt)">
         </div>
-        <div class="undo disabled pop" data-pop="Undo"></div>
-        <div class="undo r disabled"></div>
+        <button type="button" class="undo pop" data-pop="Undo" aria-label="Undo"
+          (mousedown)="runTextHistory('undo',$event)"></button>
+        <button type="button" class="undo r pop" data-pop="Redo" aria-label="Redo"
+          (mousedown)="runTextHistory('redo',$event)"></button>
       </div>
       @if (pendingDateConfirm) {
         <div class="date-confirm-pill date-confirm-pill--desktop" role="region" aria-label="Confirm reminder date">
@@ -375,6 +385,34 @@
             </button>
           }
         </div>
+      </div>
+      <div class="rd-repeat" aria-label="Repeat reminder">
+        <div class="rd-repeat-title">Repeat</div>
+        <div class="rd-repeat-options">
+          @for (option of reminderRepeatOptions; track option.value) {
+            <button type="button"
+              [class.active]="reminderRepeatType === option.value"
+              (click)="setReminderRepeatType(option.value)">
+              {{ option.label }}
+            </button>
+          }
+        </div>
+        @if (reminderRepeatType === 'custom_days') {
+          <label class="rd-repeat-custom">
+            <span>Every</span>
+            <input type="number" min="1" max="365" inputmode="numeric" [(ngModel)]="reminderRepeatCustomDays">
+            <span>days</span>
+          </label>
+        }
+        <label class="rd-repeat-float">
+          <span class="material-symbols-outlined rd-float-icon">vertical_align_top</span>
+          <span class="rd-float-copy">
+            <strong>Float to top when it fires</strong>
+            <span>Jumps this note above the rest</span>
+          </span>
+          <input type="checkbox" [(ngModel)]="reminderMoveToTopOnTrigger">
+          <span class="rd-switch" aria-hidden="true"></span>
+        </label>
       </div>
       <div class="rd-actions">
         <button type="button" class="rd-secondary" (click)="cancelReminderDate()">Cancel</button>
@@ -695,7 +733,7 @@
 <!--* note template -->
 <ng-template #noteTemplate>
   <div [hidden]="noteBody.innerHTML.length" class="note-body ph">Take a note…</div>
-  <div #noteBody (input)="onNoteBodyInput(noteBody)" (paste)="pasteEvent($event)"
+  <div #noteBody (input)="onNoteBodyInput(noteBody)" (paste)="pasteEvent($event)" (focus)="rememberTextHistoryTarget(noteBody)"
     (click)="onNoteBodyClick($event)"
     class="note-body" contenteditable="true" spellcheck="true" autocomplete="off" autocorrect="off" autocapitalize="sentences" inputmode="text">
   </div>
@@ -709,7 +747,7 @@
     <div class="cbox-plus-icon"></div>
     <div class="cbox-note-container">
       <div class="cbox-note ph">List item</div>
-      <div #cboxPh (keydown)="cboxPhKeyDown($event)" class="cbox-note" contenteditable="true" spellcheck="true" autocomplete="off" autocorrect="off" autocapitalize="sentences" inputmode="text">
+      <div #cboxPh (keydown)="cboxPhKeyDown($event)" (focus)="rememberTextHistoryTarget(cboxPh)" class="cbox-note" contenteditable="true" spellcheck="true" autocomplete="off" autocorrect="off" autocapitalize="sentences" inputmode="text">
       </div>
     </div>
   </div>
@@ -719,7 +757,7 @@
     <div class="cbox-done-container" (click)="isCboxCompletedListCollapsed = !isCboxCompletedListCollapsed">
       <div [class.rotate]="!isCboxCompletedListCollapsed" class="cbox-arrow"></div>
       <div>
-        <span>({{(checkBoxes | cboxDone:true).length}}) Completed item</span>
+        <span>({{(checkBoxes | cboxDone:true).length}}) Completed items</span>
       </div>
     </div>
   }
@@ -770,6 +808,10 @@
     (click)="this.Shared.closeTooltip(moreMenuTt);openTooltip(moreMenuTtBtn!.nativeElement,labelMenuTt)">
     Add label
   </div>
+  <div
+    (click)="this.Shared.closeTooltip(moreMenuTt);this.Shared.closeTooltip(labelMenuTt);openTooltip(moreMenuTtBtn!.nativeElement,binderMenuTt)">
+    Move to binder
+  </div>
   <!-- <div [hidden]="moreMenuEls.drawing.disabled">{{moreMenuEls.drawing.value}}</div> -->
   <div [hidden]="moreMenuEls.copy.disabled" (click)="moreMenu(moreMenuTt).clone()">
     Make a copy
@@ -777,7 +819,45 @@
   <div (click)="moreMenu(moreMenuTt).toggleCbox()">
     {{moreMenuEls.checkbox.value}}
   </div>
+  @if (isEditing && !isSharedNoteForCurrentUser() && !noteToEdit.locked) {
+    <div (click)="lockCurrentNote(moreMenuTt)">Lock note</div>
+  }
+  @if (isEditing && !isSharedNoteForCurrentUser() && noteToEdit.locked) {
+    <div (click)="relockCurrentNote(moreMenuTt)">Relock note</div>
+    <div (click)="changeCurrentNoteLock(moreMenuTt)">Change passcode</div>
+    <div (click)="removeCurrentNoteLock(moreMenuTt)">Remove lock</div>
+  }
   <!-- <div [hidden]="moreMenuEls.gdocs.disabled">{{moreMenuEls.gdocs.value}}</div> -->
+</div>
+<!--? binder MENU -->
+<div #binderMenuTt data-tooltip="true" data-is-tooltip-open="false" class="labelMenu binderMenu">
+  <div class="title">Move to binder</div>
+  <div class="search">
+    <input #newBinderInput type="text" maxlength="50" placeholder="Enter binder name"
+      (keydown.enter)="addBinderFromMenu(newBinderInput); $event.preventDefault()" (blur)="addBinderFromMenu(newBinderInput)"
+      (input)="binderMenuError=''">
+  </div>
+  @if (newBinderInput.value.trim().length) {
+    <div class="label-list create-label" (mousedown)="$event.preventDefault()" (click)="addBinderFromMenu(newBinderInput)">
+      <div class="check-icon"></div>
+      <div class="label-name">Create "{{newBinderInput.value.trim()}}"</div>
+    </div>
+  }
+  @if (binderMenuError) {
+    <div class="label-error">{{binderMenuError}}</div>
+  }
+  <div class="label-list-container">
+    <div class="label-list" (click)="selectBinder('', binderMenuTt)">
+      <div [class.done]="!binderName" class="check-icon"></div>
+      <div class="label-name">No binder</div>
+    </div>
+    @for (binder of Shared.binder.list; track binder.name) {
+      <div class="label-list" (click)="selectBinder(binder.name, binderMenuTt)">
+        <div [class.done]='isSelectedBinder(binder.name)' class="check-icon"></div>
+        <div class="label-name">{{binder.name}}</div>
+      </div>
+    }
+  </div>
 </div>
 <!--? color MENU -->
 <div #colorMenuTt data-tooltip="true" data-is-tooltip-open="false" class="colorMenu">
@@ -848,10 +928,10 @@
 <div #labelMenuTt data-tooltip="true" data-is-tooltip-open="false" class="labelMenu">
   <div class="title">Label note</div>
   <div class="search">
+    <div class="search-icon"></div>
     <input #newLabelInput type="text" maxlength="50" placeholder="Enter label name"
       (keydown.enter)="addLabelFromMenu(newLabelInput); $event.preventDefault()" (blur)="addLabelFromMenu(newLabelInput)"
       (input)="labelMenuError=''">
-    <div class="search-icon"></div>
   </div>
   @if (newLabelInput.value.trim().length) {
     <div class="label-list create-label" (mousedown)="$event.preventDefault()" (click)="addLabelFromMenu(newLabelInput)">

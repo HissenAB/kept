@@ -15,14 +15,35 @@ export class LabelsService {
   constructor(private http: HttpClient, private auth: AuthService) { }
 
   async load() {
-    const labels = await firstValueFrom(this.http.get<LabelI[]>(this.apiUrl, { headers: this.auth.authHeaders() }));
-    this.labelsList$.next(labels);
+    try {
+      const labels = await firstValueFrom(this.http.get<LabelI[]>(this.apiUrl, { headers: this.auth.authHeaders() }));
+      this.labelsList$.next(this.uniqueLabels(labels));
+    } catch (error: any) {
+      if (!navigator.onLine || error?.status === 0) {
+        this.labelsList$.next(this.uniqueLabels(this.labelsList$.value));
+        return;
+      }
+      throw error;
+    }
   }
 
   async add(labelObj: LabelI) {
-    const label = await firstValueFrom(this.http.post<LabelI>(this.apiUrl, labelObj, { headers: this.auth.authHeaders() }));
-    await this.load();
-    return label.id;
+    const name = String(labelObj.name || '').trim();
+    if (!name) throw new Error('Label name is required');
+
+    const existing = this.labelsList$.value.find(label => label.name.toLowerCase() === name.toLowerCase());
+    if (existing?.id != null) return existing.id;
+
+    if (!navigator.onLine) return this.addLocal(name);
+
+    try {
+      const label = await firstValueFrom(this.http.post<LabelI>(this.apiUrl, { ...labelObj, name }, { headers: this.auth.authHeaders() }));
+      await this.load();
+      return label.id;
+    } catch (error: any) {
+      if (error?.status === 0) return this.addLocal(name);
+      throw error;
+    }
   }
 
   async delete(id: number) {
@@ -44,5 +65,28 @@ export class LabelsService {
       }
     }
   }
-}
 
+  private addLocal(name: string) {
+    let id = -Date.now();
+    const usedIds = new Set(this.labelsList$.value.map(label => label.id));
+    while (usedIds.has(id)) id -= 1;
+
+    const labels = this.uniqueLabels([...this.labelsList$.value, { id, name }]);
+    this.labelsList$.next(labels);
+    return id;
+  }
+
+  private uniqueLabels(labels: LabelI[]) {
+    const seen = new Set<string>();
+    const unique: LabelI[] = [];
+    for (const label of labels || []) {
+      const name = String(label?.name || '').trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push({ ...label, name });
+    }
+    return unique;
+  }
+}

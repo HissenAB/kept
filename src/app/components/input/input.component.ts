@@ -1,5 +1,6 @@
 import { NoteI, CheckboxI, NoteImageI, NoteAttachmentI } from '../../interfaces/notes';
 import { Component, OnInit, ViewChild, ElementRef, ChangeDetectorRef, Input, HostBinding, HostListener } from '@angular/core';
+import { Router } from '@angular/router';
 
 import { bgImages, bgColors } from 'src/app/interfaces/tooltip';
 import { SharedService } from 'src/app/services/shared.service';
@@ -11,11 +12,13 @@ import { ShareUserI } from 'src/app/interfaces/users';
 import { LinkPreviewData, NotesService } from 'src/app/services/notes.service';
 import { PushNotificationService } from 'src/app/services/push-notification.service';
 import { ReminderService } from 'src/app/services/reminder.service';
+import { ReminderRepeatRule, ReminderRepeatType } from 'src/app/interfaces/reminder';
 import { KeptPluginsService, type ResolvedLocation } from 'src/app/services/kept-plugins.service';
 import { LocationSavedPlacesService, type LocationSavedPlace, type LocationTrigger, type SavedPlaceType } from 'src/app/services/location-saved-places.service';
 import { NgZone } from '@angular/core';
 import { TimepickerUI, type ConfirmEventData } from 'timepicker-ui';
 import { isNativePhonePlatform, shouldUseFullscreenNoteEditor } from 'src/app/utils/platform';
+import { NoteLockService } from 'src/app/services/note-lock.service';
 
 declare var Snackbar: any;
 type InputLengthI = { title?: number, body?: number, cb?: number }
@@ -36,7 +39,7 @@ export class InputComponent implements OnInit {
   }
   @HostBinding('class.native-phone-layout') readonly nativePhoneLayout = isNativePhonePlatform();
 
-  constructor(private cd: ChangeDetectorRef, public Shared: SharedService, public auth: AuthService, private notesService: NotesService, private push: PushNotificationService, private reminderService: ReminderService, public keptPlugins: KeptPluginsService, private savedPlacesService: LocationSavedPlacesService, private zone: NgZone) { }
+  constructor(private cd: ChangeDetectorRef, public Shared: SharedService, public auth: AuthService, private notesService: NotesService, private push: PushNotificationService, private reminderService: ReminderService, public keptPlugins: KeptPluginsService, private savedPlacesService: LocationSavedPlacesService, private zone: NgZone, private router: Router, public noteLock: NoteLockService) { }
 
   @ViewChild("main") main!: ElementRef<HTMLDivElement>
   //? Placeholder  ----------------------------------------------------
@@ -73,10 +76,18 @@ export class InputComponent implements OnInit {
   ].join(',')
   labels: LabelI[] = []
   private labelsDirty = false
+  binderName = ''
+  binderMenuError = ''
   isArchived = false
   isTrashed = false
   isCboxCompletedListCollapsed = false
   showTextFormatting = false
+  private textHistoryTarget?: HTMLElement
+  private cboxHistory: CheckboxI[][] = []
+  private cboxHistoryIndex = -1
+  private lastCboxStructuralChangeAt = 0
+  private lastCboxTextInputAt = 0
+  private cboxHistoryRedoMode = false
   isCbox = new BehaviorSubject<boolean>(false)
   inputLength = new BehaviorSubject<InputLengthI>({ title: 0, body: 0, cb: 0 })
   collaboratorUsers: ShareUserI[] = []
@@ -92,7 +103,18 @@ export class InputComponent implements OnInit {
   customTimePicker: any
   customTimePickerInput?: HTMLInputElement
   pendingReminderDate: Date | null = null
+  pendingReminderRepeatRule: ReminderRepeatRule | null = null
   pendingReminderLocation: { locationName: string; latitude: number; longitude: number; radiusMeters: number; timezone: string; locationTrigger: LocationTrigger } | null = null
+  reminderRepeatType: ReminderRepeatType = 'none'
+  reminderRepeatCustomDays = 2
+  reminderMoveToTopOnTrigger = false
+  readonly reminderRepeatOptions: Array<{ value: ReminderRepeatType; label: string }> = [
+    { value: 'none', label: 'None' },
+    { value: 'daily', label: 'Daily' },
+    { value: 'weekly', label: 'Weekly' },
+    { value: 'monthly', label: 'Monthly' },
+    { value: 'custom_days', label: '...' }
+  ]
   showReminderTypeDialog = false
   showReminderDateDialog = false
   showReminderLocationDialog = false
@@ -244,6 +266,7 @@ export class InputComponent implements OnInit {
     }
     this.labels = JSON.parse(JSON.stringify(this.Shared.label.list))
     this.labelsDirty = false
+    this.binderName = this.isEditing ? (this.noteToEdit.binder || '') : this.currentRouteBinder()
     /*
     the correct way is to use `mousedown` because : 
     https://www.javascripttutorial.net/javascript-dom/javascript-mouse-events/
@@ -344,6 +367,10 @@ export class InputComponent implements OnInit {
     return this.isHybridNote;
   }
 
+  canFormatText(): boolean {
+    return !this.isCbox.value || this.hasHybridBody()
+  }
+
   private hasMeaningfulBody(value?: string | null) {
     const div = document.createElement('div')
     div.innerHTML = value || ''
@@ -390,6 +417,7 @@ export class InputComponent implements OnInit {
       images: this.images.map(image => ({ ...image, dataUrl: this.auth.canonicalImageUrl(image.dataUrl) })),
       isCbox: this.isCbox.value,
       labels: labelsForSave,
+      binder: this.binderName,
       archived: this.isArchived,
       trashed: this.isTrashed
     }
@@ -480,11 +508,14 @@ export class InputComponent implements OnInit {
     // has been persisted, so native clients see a real noteId in the request.
     if (this.pendingReminderDate) {
       const reminderDate = this.pendingReminderDate
+      const repeatRule = this.pendingReminderRepeatRule
       this.pendingReminderDate = null
+      this.pendingReminderRepeatRule = null
       this.reminderService.create({
         noteId,
         dueAtUtc: reminderDate.toISOString(),
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        repeatRule,
         title,
         body
       }).then(result => {
@@ -522,6 +553,7 @@ export class InputComponent implements OnInit {
       images: this.normalizeImages(note.images || []),
       isCbox: !!note.isCbox,
       labels: this.normalizeLabels(note.labels || []),
+      binder: note.binder || '',
       archived: !!note.archived,
       trashed: !!note.trashed
     })
@@ -562,6 +594,58 @@ export class InputComponent implements OnInit {
     }))
   }
 
+  private cloneCheckBoxes(checkBoxes: CheckboxI[] = []) {
+    return this.normalizeCheckBoxes(checkBoxes)
+  }
+
+  private resetCboxHistory() {
+    this.cboxHistory = [this.cloneCheckBoxes(this.checkBoxes)]
+    this.cboxHistoryIndex = 0
+    this.lastCboxStructuralChangeAt = 0
+    this.lastCboxTextInputAt = 0
+    this.cboxHistoryRedoMode = false
+  }
+
+  private syncCboxDomIntoModel() {
+    this.checkBoxes = this.currentCheckBoxesForSave(false)
+  }
+
+  private pushCboxHistorySnapshot() {
+    const snapshot = this.cloneCheckBoxes(this.currentCheckBoxesForSave(false))
+    const previous = this.cboxHistory[this.cboxHistoryIndex]
+    if (previous && JSON.stringify(previous) === JSON.stringify(snapshot)) return
+    this.cboxHistory = this.cboxHistory.slice(0, this.cboxHistoryIndex + 1)
+    this.cboxHistory.push(snapshot)
+    if (this.cboxHistory.length > 80) this.cboxHistory.shift()
+    this.cboxHistoryIndex = this.cboxHistory.length - 1
+    this.lastCboxStructuralChangeAt = Date.now()
+    this.cboxHistoryRedoMode = true
+  }
+
+  private canStepCboxHistory(command: 'undo' | 'redo') {
+    return command === 'undo'
+      ? this.cboxHistoryIndex > 0
+      : this.cboxHistoryIndex >= 0 && this.cboxHistoryIndex < this.cboxHistory.length - 1
+  }
+
+  private shouldUseCboxHistory(command: 'undo' | 'redo') {
+    if (!this.isCbox.value) return false
+    if (!this.canStepCboxHistory(command)) return false
+    if (command === 'redo') return this.cboxHistoryRedoMode
+    return this.lastCboxStructuralChangeAt >= this.lastCboxTextInputAt
+  }
+
+  private stepCboxHistory(command: 'undo' | 'redo') {
+    if (!this.canStepCboxHistory(command)) return
+    this.cboxHistoryIndex += command === 'undo' ? -1 : 1
+    this.checkBoxes = this.cloneCheckBoxes(this.cboxHistory[this.cboxHistoryIndex])
+    this.noteToEdit.checkBoxes = this.checkBoxes
+    this.inputLength.next({ ...this.inputLength.value, cb: this.checkBoxes.length })
+    this.cboxHistoryRedoMode = this.canStepCboxHistory('redo')
+    this.cd.detectChanges()
+    this.queueCoEditAutosave()
+  }
+
   private notePlainText(value?: string | null) {
     const div = document.createElement('div')
     div.innerHTML = value || ''
@@ -580,6 +664,7 @@ export class InputComponent implements OnInit {
     this.hasBackgroundImage = false
     //
     this.checkBoxes = []
+    this.resetCboxHistory()
     this.images = []
     this.attachments = []
     this.pendingAttachmentFiles = []
@@ -1077,6 +1162,7 @@ export class InputComponent implements OnInit {
   }
 
   addCheckBox(data: string, insertAfterId?: number) {
+    this.syncCboxDomIntoModel()
     const maxId = this.checkBoxes.reduce((m, c) => Math.max(m, c.id ?? 0), -1)
     const cb = {
       done: false,
@@ -1094,6 +1180,7 @@ export class InputComponent implements OnInit {
       this.checkBoxes.push(cb)
     }
     this.inputLength.next({ ...this.inputLength.value, cb: this.checkBoxes.length })
+    this.pushCboxHistorySnapshot()
     this.queueCoEditAutosave()
     return cb
   }
@@ -1106,6 +1193,7 @@ export class InputComponent implements OnInit {
 
   cboxInputFocus(event: FocusEvent) {
     const el = event.target as HTMLDivElement
+    this.rememberTextHistoryTarget(el)
     setTimeout(() => {
       const id = Number(el.dataset['cboxId'])
       const pending = this.pendingCboxFocusPoint
@@ -1166,6 +1254,8 @@ export class InputComponent implements OnInit {
 
   onCboxInput(id: number) {
     if (!this.checkBoxes.some(item => item.id === id)) return
+    this.lastCboxTextInputAt = Date.now()
+    this.cboxHistoryRedoMode = false
     this.queueCoEditAutosave()
   }
 
@@ -1215,6 +1305,7 @@ export class InputComponent implements OnInit {
   }
 
   cboxDragStart(id: number, event: DragEvent) {
+    this.syncCboxDomIntoModel()
     this.draggedCboxId = id
     this.cboxDragOrderChanged = false
     if (event.dataTransfer) {
@@ -1502,6 +1593,46 @@ export class InputComponent implements OnInit {
   toggleTextFormatting(event: Event) {
     event.stopPropagation()
     this.showTextFormatting = !this.showTextFormatting
+  }
+
+  rememberTextHistoryTarget(target?: HTMLElement | null) {
+    if (!target?.isContentEditable) return
+    this.textHistoryTarget = target
+  }
+
+  runTextHistory(command: 'undo' | 'redo', event: Event) {
+    event.preventDefault()
+    event.stopPropagation()
+
+    if (this.shouldUseCboxHistory(command)) {
+      this.stepCboxHistory(command)
+      return
+    }
+
+    const target = this.activeTextHistoryTarget()
+    target?.focus({ preventScroll: true })
+    document.execCommand(command)
+    this.scheduleTextHistoryRefresh()
+  }
+
+  private activeTextHistoryTarget() {
+    const active = document.activeElement as HTMLElement | null
+    if (active?.isContentEditable) {
+      this.textHistoryTarget = active
+      return active
+    }
+    if (this.textHistoryTarget?.isConnected) return this.textHistoryTarget
+    return this.noteBody?.nativeElement || this.noteTitle?.nativeElement
+  }
+
+  private scheduleTextHistoryRefresh() {
+    setTimeout(() => {
+      this.updateInputLength({
+        title: this.noteTitle?.nativeElement.innerHTML.length || 0,
+        body: this.noteBody?.nativeElement.innerHTML.length || 0
+      })
+      this.queueCoEditAutosave()
+    }, 0)
   }
 
   applyTextFormat(command: 'h1' | 'h2' | 'body' | 'bold' | 'italic' | 'underline' | 'clear', event: Event) {
@@ -2238,7 +2369,9 @@ export class InputComponent implements OnInit {
   }
 
   private persistCboxDragOrder() {
-    if (!this.cboxDragOrderChanged || !this.isEditing || !this.noteToEdit.id) return
+    if (!this.cboxDragOrderChanged) return
+    this.pushCboxHistorySnapshot()
+    if (!this.isEditing || !this.noteToEdit.id) return
     this.noteToEdit.checkBoxes = this.checkBoxes
     this.saveBaselineSnapshot = this.noteSaveSnapshot({ ...this.noteToEdit, checkBoxes: this.checkBoxes })
     this.notesService.updateKey({ checkBoxes: this.checkBoxes }, this.noteToEdit.id)
@@ -2332,18 +2465,27 @@ export class InputComponent implements OnInit {
   }
 
   cboxTools(id: number) {
-    let i = this.checkBoxes.findIndex(x => x.id === id)
     let actions = {
       remove: () => {
+        this.syncCboxDomIntoModel()
+        const i = this.checkBoxes.findIndex(x => x.id === id)
+        if (i < 0) return
         this.checkBoxes.splice(i, 1)
         this.inputLength.next({ ...this.inputLength.value, cb: this.checkBoxes.length })
+        this.pushCboxHistorySnapshot()
         this.queueCoEditAutosave()
       },
       check: () => {
+        this.syncCboxDomIntoModel()
+        const i = this.checkBoxes.findIndex(x => x.id === id)
+        if (i < 0) return
         this.checkBoxes[i].done = !this.checkBoxes[i].done
+        this.pushCboxHistorySnapshot()
         this.queueCoEditAutosave()
       },
       update: (el: HTMLDivElement) => {
+        const i = this.checkBoxes.findIndex(x => x.id === id)
+        if (i < 0) return
         let elValue = el?.innerHTML
         this.checkBoxes[i].data = elValue
         this.queueCoEditAutosave()
@@ -2382,6 +2524,7 @@ export class InputComponent implements OnInit {
     this.noteMain.nativeElement.style.borderColor = note.bgColor
     this.updateTextColor(note.bgColor)
     this.checkBoxes = JSON.parse(JSON.stringify(note.checkBoxes || []))
+    this.resetCboxHistory()
     // Hybrid: latch BEFORE flipping isCbox so the noteBody ViewChild is
     // present after change detection (otherwise the body assignment below
     // would silently no-op when loading a hybrid note from a checklist-only
@@ -2390,6 +2533,7 @@ export class InputComponent implements OnInit {
     this.isCbox.next(note.isCbox)
     this.isArchived = note.archived
     this.isTrashed = note.trashed
+    this.binderName = note.binder || ''
     this.saveBaselineSnapshot = this.noteSaveSnapshot(note)
     //
     this.inputLength.next({ title: note.noteTitle.length, body: (note.noteBody ? note.noteBody?.length : 0) + this.images.length + this.attachments.length, cb: note.checkBoxes?.length! })
@@ -2518,6 +2662,35 @@ export class InputComponent implements OnInit {
     this.labelsDirty = true
   }
 
+  async addBinderFromMenu(input: HTMLInputElement) {
+    const name = input.value.trim()
+    if (!name) return
+    const existing = this.Shared.binder.list.find(binder => binder.name.toLowerCase() === name.toLowerCase())
+    if (existing) {
+      this.binderName = existing.name
+      input.value = ''
+      this.binderMenuError = ''
+      return
+    }
+    try {
+      await this.Shared.binder.db.add(name)
+      this.binderName = name
+      input.value = ''
+      this.binderMenuError = ''
+    } catch {
+      this.binderMenuError = 'Could not create binder'
+    }
+  }
+
+  selectBinder(name: string, tooltipEl?: HTMLDivElement) {
+    this.binderName = String(name || '').trim()
+    if (tooltipEl) this.Shared.closeTooltip(tooltipEl)
+  }
+
+  isSelectedBinder(name: string) {
+    return (this.binderName || '') === (name || '')
+  }
+
   isSharedNoteForCurrentUser() {
     const ownerId = this.noteToEdit?.ownerUserId
     const me = this.auth.currentUser?.id
@@ -2557,6 +2730,56 @@ export class InputComponent implements OnInit {
     }
     this.Shared.closeTooltip(tooltipEl)
     return actions
+  }
+
+  async lockCurrentNote(tooltipEl?: HTMLDivElement) {
+    tooltipEl && this.Shared.closeTooltip(tooltipEl)
+    if (!this.isEditing || !this.noteToEdit?.id || this.isSharedNoteForCurrentUser()) return
+    const fields = await this.noteLock.createLockFields()
+    if (!fields) return
+    await this.notesService.updateKey(fields, this.noteToEdit.id)
+    Object.assign(this.noteToEdit, fields)
+    this.noteLock.markUnlocked(this.noteToEdit)
+    this.saveBaselineSnapshot = this.noteSaveSnapshot(this.noteToEdit)
+  }
+
+  async changeCurrentNoteLock(tooltipEl?: HTMLDivElement) {
+    tooltipEl && this.Shared.closeTooltip(tooltipEl)
+    if (!this.isEditing || !this.noteToEdit?.id || this.isSharedNoteForCurrentUser()) return
+    const fields = await this.noteLock.changeLockFields(this.noteToEdit)
+    if (!fields) return
+    await this.notesService.updateKey(fields, this.noteToEdit.id)
+    Object.assign(this.noteToEdit, fields)
+    this.noteLock.markUnlocked(this.noteToEdit)
+    this.saveBaselineSnapshot = this.noteSaveSnapshot(this.noteToEdit)
+  }
+
+  async removeCurrentNoteLock(tooltipEl?: HTMLDivElement) {
+    tooltipEl && this.Shared.closeTooltip(tooltipEl)
+    if (!this.isEditing || !this.noteToEdit?.id || this.isSharedNoteForCurrentUser()) return
+    const fields = await this.noteLock.removeLockFields(this.noteToEdit)
+    if (!fields) return
+    await this.notesService.updateKey(fields, this.noteToEdit.id)
+    Object.assign(this.noteToEdit, fields)
+    this.saveBaselineSnapshot = this.noteSaveSnapshot(this.noteToEdit)
+  }
+
+  relockCurrentNote(tooltipEl?: HTMLDivElement) {
+    tooltipEl && this.Shared.closeTooltip(tooltipEl)
+    if (!this.isEditing || !this.noteToEdit?.id || !this.noteToEdit.locked) return
+    this.noteLock.clearUnlocked(this.noteToEdit)
+    this.Shared.closeModal.next(true)
+  }
+
+  private currentRouteBinder() {
+    const path = this.router.url.split('?')[0].split('#')[0]
+    const match = path.match(/\/binder\/([^/]+)/)
+    if (!match) return ''
+    try {
+      return decodeURIComponent(match[1])
+    } catch {
+      return match[1]
+    }
   }
 
   colorMenu = {
@@ -2792,6 +3015,7 @@ export class InputComponent implements OnInit {
     }
     if (!this.cboxDragImage) {
       this.checkBoxes = JSON.parse(JSON.stringify(note.checkBoxes || []));
+      this.resetCboxHistory();
     }
     const oldDrawing = this.images.find(i => i.id === 'drawing');
     this.images = (note.images || []).map(image => ({ ...image, dataUrl: this.auth.authenticatedImageUrl(image.dataUrl) }));
@@ -3099,9 +3323,33 @@ export class InputComponent implements OnInit {
     this.showReminderTypeDialog = false
     this.showReminderDateDialog = false
     this.showReminderLocationDialog = false
+    this.resetReminderRepeatState()
     this.resetLocationState()
     this.destroyTimePicker()
     document.removeEventListener('mousedown', this.pickerOutsideHandler)
+  }
+
+  setReminderRepeatType(type: ReminderRepeatType) {
+    this.reminderRepeatType = type
+    if (type !== 'custom_days') this.reminderRepeatCustomDays = 2
+  }
+
+  private selectedReminderRepeatRule(): ReminderRepeatRule | null {
+    if (this.reminderRepeatType === 'none') {
+      return this.reminderMoveToTopOnTrigger ? { type: 'none', moveToTopOnTrigger: true } : null
+    }
+    const intervalDays = Math.max(1, Math.floor(Number(this.reminderRepeatCustomDays) || 1))
+    return {
+      type: this.reminderRepeatType,
+      ...(this.reminderRepeatType === 'custom_days' ? { intervalDays } : {}),
+      moveToTopOnTrigger: this.reminderMoveToTopOnTrigger
+    }
+  }
+
+  private resetReminderRepeatState() {
+    this.reminderRepeatType = 'none'
+    this.reminderRepeatCustomDays = 2
+    this.reminderMoveToTopOnTrigger = false
   }
 
   // Synchronous-from-gesture permission request. iOS Safari refuses to show
@@ -3156,11 +3404,12 @@ export class InputComponent implements OnInit {
     // Backup prompt for users who skipped the picker open (e.g. via custom
     // date input). Permission was already requested when the picker opened.
     this.promptForNotificationPermission()
+    const repeatRule = this.selectedReminderRepeatRule()
     if (this.isEditing && this.noteToEdit.id) {
       const existing = this.getActiveReminder()
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
       if (existing && (existing as any).id) {
-        this.reminderService.update((existing as any).id, { dueAtUtc: date.toISOString(), status: 'pending' })
+        this.reminderService.update((existing as any).id, { dueAtUtc: date.toISOString(), status: 'pending', repeatRule })
           .then(result => { if (!result) this.showReminderSaveError() })
           .catch(() => this.showReminderSaveError())
       } else {
@@ -3168,6 +3417,7 @@ export class InputComponent implements OnInit {
           noteId: this.noteToEdit.id,
           dueAtUtc: date.toISOString(),
           timezone: tz,
+          repeatRule,
           title: this.notePlainText(this.noteToEdit.noteTitle),
           body: this.notePlainText(this.noteToEdit.noteBody)
         }).then(result => { if (!result) this.showReminderSaveError() })
@@ -3176,8 +3426,10 @@ export class InputComponent implements OnInit {
     } else {
       // For new notes, store locally until save
       this.pendingReminderDate = date
+      this.pendingReminderRepeatRule = repeatRule
     }
     this.closeReminderPicker()
+    this.resetReminderRepeatState()
     this.cd.detectChanges()
   }
 
@@ -3187,7 +3439,6 @@ export class InputComponent implements OnInit {
     const t = this.toTwentyFourHourTime(this.customTime || timeInp.value)
     
     if (!d || !t) return
-    this.closeReminderPicker()
     this.customPickerOpen = false
     this.setReminder(new Date(`${d}T${t}`))
   }
@@ -3196,6 +3447,7 @@ export class InputComponent implements OnInit {
     event.stopPropagation()
     if (this.pendingReminderDate || this.pendingReminderLocation) {
       this.pendingReminderDate = null
+      this.pendingReminderRepeatRule = null
       this.pendingReminderLocation = null
       this.pendingAndroidLocationReminder = null
       this.showAndroidBackgroundLocationEducation = false
@@ -3210,6 +3462,7 @@ export class InputComponent implements OnInit {
       if (existing && (existing as any).id) await this.reminderService.delete((existing as any).id)
     } else {
       this.pendingReminderDate = null
+      this.pendingReminderRepeatRule = null
       this.pendingReminderLocation = null
     }
     this.closeReminderPicker()

@@ -431,6 +431,10 @@ async function init() {
       images TEXT NOT NULL DEFAULT '[]',
       isCbox INTEGER NOT NULL DEFAULT 0,
       labels TEXT NOT NULL DEFAULT '[]',
+      binder TEXT NOT NULL DEFAULT '',
+      locked INTEGER NOT NULL DEFAULT 0,
+      lockSalt TEXT NOT NULL DEFAULT '',
+      lockHash TEXT NOT NULL DEFAULT '',
       archived INTEGER NOT NULL DEFAULT 0,
       trashed INTEGER NOT NULL DEFAULT 0,
       sortOrder REAL NOT NULL DEFAULT 0,
@@ -473,6 +477,18 @@ async function init() {
   }
   if (!noteColumns.some(column => column.name === 'lwwOperationId')) {
     await run(`ALTER TABLE notes ADD COLUMN lwwOperationId TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!noteColumns.some(column => column.name === 'binder')) {
+    await run(`ALTER TABLE notes ADD COLUMN binder TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!noteColumns.some(column => column.name === 'locked')) {
+    await run(`ALTER TABLE notes ADD COLUMN locked INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!noteColumns.some(column => column.name === 'lockSalt')) {
+    await run(`ALTER TABLE notes ADD COLUMN lockSalt TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!noteColumns.some(column => column.name === 'lockHash')) {
+    await run(`ALTER TABLE notes ADD COLUMN lockHash TEXT NOT NULL DEFAULT ''`);
   }
   await run('UPDATE notes SET sortOrder = id WHERE sortOrder = 0 OR sortOrder IS NULL');
   const notesWithoutSyncIds = await all(`SELECT id FROM notes WHERE syncId IS NULL OR syncId = ''`);
@@ -995,10 +1011,15 @@ function canonicalizeNoteImages(images) {
 }
 
 function canonicalizeNotePayload(payload) {
+  const locked = !!payload.locked && !!payload.lockSalt && !!payload.lockHash;
   return {
     ...payload,
     noteBody: canonicalizeNoteHtmlImages(payload.noteBody || ''),
-    images: canonicalizeNoteImages(payload.images || [])
+    images: canonicalizeNoteImages(payload.images || []),
+    binder: String(payload.binder || '').trim().slice(0, 80),
+    locked,
+    lockSalt: locked ? String(payload.lockSalt || '').slice(0, 256) : '',
+    lockHash: locked ? String(payload.lockHash || '').slice(0, 512) : ''
   };
 }
 
@@ -1040,6 +1061,10 @@ function dbNoteToApi(row) {
     images: parseJson(row.images || '[]', []),
     isCbox: Boolean(row.isCbox),
     labels: parseJson(row.labels, []),
+    binder: row.binder || '',
+    locked: Boolean(row.locked),
+    lockSalt: row.lockSalt || '',
+    lockHash: row.lockHash || '',
     archived: Boolean(row.archived),
     trashed: Boolean(row.trashed),
     trashedAt: row.trashedAt || '',
@@ -1293,40 +1318,47 @@ function cardNoteBody(row, previewText) {
 }
 
 function cardSearchText(row) {
+  if (row.locked) return [row.noteTitle || '', row.labels || '', row.binder || ''].join(' ');
   return [
     row.noteTitle || '',
     row.noteBody || '',
     row.checkBoxes || '',
     row.labels || '',
+    row.binder || '',
     row.attachmentNames || ''
   ].join(' ');
 }
 
 function dbNoteToCard(row, options = {}) {
   const includeSearchText = !!options.includeSearchText;
+  const locked = Boolean(row.locked);
   const pinned = row.userPinned !== undefined ? row.userPinned : row.pinned;
   const labels = parseJson(row.labels || '[]', []);
   const checkBoxes = parseJson(row.checkBoxes || '[]', []);
   const parsedImages = parseJson(row.images || '[]', []);
   const images = Array.isArray(parsedImages) ? parsedImages.filter(Boolean) : [];
-  const previewText = notePreviewText(row);
+  const previewText = locked ? '' : notePreviewText(row);
   return {
     id: row.id,
     syncId: row.syncId,
     ownerUserId: row.ownerUserId,
     noteTitle: row.noteTitle,
-    noteBody: cardNoteBody(row, previewText),
+    noteBody: locked ? '' : cardNoteBody(row, previewText),
     searchText: includeSearchText ? cardSearchText(row) : undefined,
     previewText,
-    linkCount: noteLinkCount(row),
+    linkCount: locked ? 0 : noteLinkCount(row),
     pinned: Boolean(pinned),
     bgColor: row.bgColor || '',
     bgImage: row.bgImage || '',
-    checkBoxes: Array.isArray(checkBoxes) ? checkBoxes.slice(0, 8) : [],
-    images,
+    checkBoxes: locked ? [] : (Array.isArray(checkBoxes) ? checkBoxes.slice(0, 8) : []),
+    images: locked ? [] : images,
     hasMoreImages: false,
     isCbox: Boolean(row.isCbox),
     labels,
+    binder: row.binder || '',
+    locked,
+    lockSalt: row.lockSalt || '',
+    lockHash: row.lockHash || '',
     archived: Boolean(row.archived),
     trashed: Boolean(row.trashed),
     trashedAt: row.trashedAt || '',
@@ -1353,6 +1385,7 @@ function dbNoteToCard(row, options = {}) {
 }
 
 function noteSummaryFromRow(row) {
+  const locked = Boolean(row.locked);
   const checkBoxes = parseJson(row.checkBoxes || '[]', []);
   const labels = parseJson(row.labels || '[]', []);
   const collaboratorIds = row.collaboratorIds
@@ -1363,10 +1396,14 @@ function noteSummaryFromRow(row) {
   return {
     id: row.id,
     title: row.noteTitle || '',
-    bodyPreview: notePreviewText(row),
+    bodyPreview: locked ? '' : notePreviewText(row),
     type: hasDrawing ? 'drawing' : (row.isCbox || hasChecklist ? 'todo' : 'text'),
     labels,
-    checklistPreview: hasChecklist ? checkBoxes.slice(0, 6).map(item => ({
+    binder: row.binder || '',
+    locked: Boolean(row.locked),
+    lockSalt: row.lockSalt || '',
+    lockHash: row.lockHash || '',
+    checklistPreview: !locked && hasChecklist ? checkBoxes.slice(0, 6).map(item => ({
       id: item.id,
       data: plainText(item.data || ''),
       done: !!item.done
@@ -1753,8 +1790,8 @@ async function smartCreateNote(userId, action, options = {}) {
     : [];
   const result = await run(
     `INSERT INTO notes
-	     (ownerUserId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, lastEditorUserId, isDemo)
-	     VALUES (?, ?, ?, ?, '', ?, '[]', ?, ?, 0, 0, NULL, ?, ?, ?, ?, 0)`,
+	     (ownerUserId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, binder, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, lastEditorUserId, isDemo)
+	     VALUES (?, ?, ?, ?, '', ?, '[]', ?, ?, '', 0, 0, NULL, ?, ?, ?, ?, 0)`,
 	    [
 	      userId,
 	      action.title || '',
@@ -2935,7 +2972,33 @@ function startReminderScheduler() {
       );
       const enrichedDue = await enrichReminderResponses(due);
       for (const reminder of enrichedDue) {
-        await run(`UPDATE reminders SET status = 'fired', updatedAt = ? WHERE id = ?`, [now, reminder.id]);
+        const repeat = parseRepeatRule(reminder.repeatRule);
+        const nextDueAtUtc = repeat ? nextRepeatDueAt(reminder.dueAtUtc, repeat) : null;
+        const stamp = serverLwwStamp();
+        let updatedReminder = reminder;
+        if (repeat && nextDueAtUtc) {
+          await run(
+            `UPDATE reminders SET
+               status = 'pending', dueAtUtc = ?, updatedAt = ?,
+               lwwPhysicalMs = ?, lwwLogical = ?, lwwDeviceId = ?, lwwOperationId = ?
+             WHERE id = ?`,
+            [nextDueAtUtc, now, stamp.physicalMs, stamp.logical, stamp.deviceId, stamp.operationId, reminder.id]
+          );
+          if (repeat.moveToTopOnTrigger) await floatReminderNoteToTop(reminder.userId, reminder.noteId);
+          updatedReminder = await get('SELECT * FROM reminders WHERE id = ?', [reminder.id]);
+          await recordReminderSyncChange(updatedReminder, 'upsert');
+        } else {
+          await run(
+            `UPDATE reminders SET
+               status = 'fired', updatedAt = ?,
+               lwwPhysicalMs = ?, lwwLogical = ?, lwwDeviceId = ?, lwwOperationId = ?
+             WHERE id = ?`,
+            [now, stamp.physicalMs, stamp.logical, stamp.deviceId, stamp.operationId, reminder.id]
+          );
+          if (repeat?.moveToTopOnTrigger) await floatReminderNoteToTop(reminder.userId, reminder.noteId);
+          updatedReminder = await get('SELECT * FROM reminders WHERE id = ?', [reminder.id]);
+          await recordReminderSyncChange(updatedReminder, 'upsert');
+        }
         broadcastRealtime([reminder.userId], {
           type: 'reminder-fired',
           reminderId: reminder.id,
@@ -3888,9 +3951,9 @@ async function applySyncNoteMutation(userId, mutation) {
   if (!existing) {
     const result = await run(
       `INSERT INTO notes
-       (ownerUserId, syncId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, lastEditorUserId, isDemo,
+       (ownerUserId, syncId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, binder, locked, lockSalt, lockHash, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, lastEditorUserId, isDemo,
         lwwPhysicalMs, lwwLogical, lwwDeviceId, lwwOperationId)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         userId,
         syncId,
@@ -3902,6 +3965,10 @@ async function applySyncNoteMutation(userId, mutation) {
         JSON.stringify(noteData.images || []),
         noteData.isCbox ? 1 : 0,
         JSON.stringify(noteData.labels || []),
+        noteData.binder || '',
+        noteData.locked ? 1 : 0,
+        noteData.lockSalt || '',
+        noteData.lockHash || '',
         noteData.archived ? 1 : 0,
         noteData.trashed ? 1 : 0,
         noteData.trashed ? now : null,
@@ -3926,20 +3993,36 @@ async function applySyncNoteMutation(userId, mutation) {
   const note = await getAccessibleNote(existing.id, userId);
   if (!note) return { ok: false, status: 403, error: 'Note not accessible.', syncId };
   const isOwner = note.ownerUserId === userId;
+  if (!Object.prototype.hasOwnProperty.call(payload, 'binder')) {
+    noteData.binder = note.binder || '';
+  }
+  if (!Object.prototype.hasOwnProperty.call(payload, 'locked')) {
+    noteData.locked = Boolean(note.locked);
+  }
+  if (!Object.prototype.hasOwnProperty.call(payload, 'lockSalt')) {
+    noteData.lockSalt = note.lockSalt || '';
+  }
+  if (!Object.prototype.hasOwnProperty.call(payload, 'lockHash')) {
+    noteData.lockHash = note.lockHash || '';
+  }
   if (!isOwner) {
     noteData.bgColor = note.bgColor || '';
     noteData.bgImage = note.bgImage || '';
     noteData.labels = parseJson(note.labels, []);
+    noteData.binder = note.binder || '';
     noteData.archived = Boolean(note.archived);
     noteData.trashed = Boolean(note.trashed);
     noteData.pinned = Boolean(note.pinned);
     noteData.isCbox = Boolean(note.isCbox);
+    noteData.locked = Boolean(note.locked);
+    noteData.lockSalt = note.lockSalt || '';
+    noteData.lockHash = note.lockHash || '';
   }
   const trashedAt = nextTrashedAt(note, noteData);
   await run(
     `UPDATE notes SET
       noteTitle = ?, noteBody = ?, bgColor = ?, bgImage = ?,
-      checkBoxes = ?, images = ?, isCbox = ?, labels = ?, archived = ?, trashed = ?, trashedAt = ?, updatedAt = ?, lastEditorUserId = ?, isDemo = ?,
+      checkBoxes = ?, images = ?, isCbox = ?, labels = ?, binder = ?, locked = ?, lockSalt = ?, lockHash = ?, archived = ?, trashed = ?, trashedAt = ?, updatedAt = ?, lastEditorUserId = ?, isDemo = ?,
       lwwPhysicalMs = ?, lwwLogical = ?, lwwDeviceId = ?, lwwOperationId = ?
      WHERE id = ?`,
     [
@@ -3951,6 +4034,10 @@ async function applySyncNoteMutation(userId, mutation) {
       JSON.stringify(noteData.images || []),
       noteData.isCbox ? 1 : 0,
       JSON.stringify(noteData.labels || []),
+      noteData.binder || '',
+      noteData.locked ? 1 : 0,
+      noteData.lockSalt || '',
+      noteData.lockHash || '',
       noteData.archived ? 1 : 0,
       noteData.trashed ? 1 : 0,
       trashedAt,
@@ -4803,8 +4890,8 @@ app.post('/api/notes', requireAuth, asyncRoute(async (req, res) => {
   const syncId = String(noteData.syncId || noteData.clientId || `note-${crypto.randomUUID()}`);
   const result = await run(
     `INSERT INTO notes
-     (ownerUserId, syncId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, lastEditorUserId, isDemo)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (ownerUserId, syncId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, binder, locked, lockSalt, lockHash, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, lastEditorUserId, isDemo)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       req.user.id,
       syncId,
@@ -4816,6 +4903,10 @@ app.post('/api/notes', requireAuth, asyncRoute(async (req, res) => {
       JSON.stringify(noteData.images || []),
       noteData.isCbox ? 1 : 0,
       JSON.stringify(noteData.labels || []),
+      noteData.binder || '',
+      noteData.locked ? 1 : 0,
+      noteData.lockSalt || '',
+      noteData.lockHash || '',
       noteData.archived ? 1 : 0,
       noteData.trashed ? 1 : 0,
       trashedAt,
@@ -4844,16 +4935,20 @@ app.put('/api/notes/:id', requireAuth, asyncRoute(async (req, res) => {
     next.bgColor = note.bgColor || '';
     next.bgImage = note.bgImage || '';
     next.labels = parseJson(note.labels, []);
+    next.binder = note.binder || '';
     next.archived = Boolean(note.archived);
     next.trashed = Boolean(note.trashed);
     next.pinned = Boolean(note.pinned);
     next.isCbox = Boolean(note.isCbox);
+    next.locked = Boolean(note.locked);
+    next.lockSalt = note.lockSalt || '';
+    next.lockHash = note.lockHash || '';
   }
   const trashedAt = nextTrashedAt(note, next);
   await run(
     `UPDATE notes SET
       noteTitle = ?, noteBody = ?, bgColor = ?, bgImage = ?,
-      checkBoxes = ?, images = ?, isCbox = ?, labels = ?, archived = ?, trashed = ?, trashedAt = ?, updatedAt = ?, lastEditorUserId = ?, isDemo = ?
+      checkBoxes = ?, images = ?, isCbox = ?, labels = ?, binder = ?, locked = ?, lockSalt = ?, lockHash = ?, archived = ?, trashed = ?, trashedAt = ?, updatedAt = ?, lastEditorUserId = ?, isDemo = ?
      WHERE id = ?`,
     [
       String(next.noteTitle || ''),
@@ -4864,6 +4959,10 @@ app.put('/api/notes/:id', requireAuth, asyncRoute(async (req, res) => {
       JSON.stringify(next.images || []),
       next.isCbox ? 1 : 0,
       JSON.stringify(next.labels || []),
+      next.binder || '',
+      next.locked ? 1 : 0,
+      next.lockSalt || '',
+      next.lockHash || '',
       next.archived ? 1 : 0,
       next.trashed ? 1 : 0,
       trashedAt,
@@ -4895,16 +4994,20 @@ app.patch('/api/notes/:id', requireAuth, asyncRoute(async (req, res) => {
     next.bgColor = existing.bgColor || '';
     next.bgImage = existing.bgImage || '';
     next.labels = parseJson(existing.labels, []);
+    next.binder = existing.binder || '';
     next.archived = Boolean(existing.archived);
     next.trashed = Boolean(existing.trashed);
     next.pinned = Boolean(existing.pinned);
     next.isCbox = Boolean(existing.isCbox);
+    next.locked = Boolean(existing.locked);
+    next.lockSalt = existing.lockSalt || '';
+    next.lockHash = existing.lockHash || '';
   }
   const trashedAt = nextTrashedAt(existing, next);
   await run(
     `UPDATE notes SET
       noteTitle = ?, noteBody = ?, bgColor = ?, bgImage = ?,
-      checkBoxes = ?, images = ?, isCbox = ?, labels = ?, archived = ?, trashed = ?, trashedAt = ?, updatedAt = ?, lastEditorUserId = ?, isDemo = ?
+      checkBoxes = ?, images = ?, isCbox = ?, labels = ?, binder = ?, locked = ?, lockSalt = ?, lockHash = ?, archived = ?, trashed = ?, trashedAt = ?, updatedAt = ?, lastEditorUserId = ?, isDemo = ?
      WHERE id = ?`,
     [
       String(next.noteTitle || ''),
@@ -4915,6 +5018,10 @@ app.patch('/api/notes/:id', requireAuth, asyncRoute(async (req, res) => {
       JSON.stringify(next.images || []),
       next.isCbox ? 1 : 0,
       JSON.stringify(next.labels || []),
+      next.binder || '',
+      next.locked ? 1 : 0,
+      next.lockSalt || '',
+      next.lockHash || '',
       next.archived ? 1 : 0,
       next.trashed ? 1 : 0,
       trashedAt,
@@ -4944,8 +5051,8 @@ app.post('/api/notes/:id/clone', requireAuth, asyncRoute(async (req, res) => {
   const note = dbNoteToApi(row);
   const result = await run(
     `INSERT INTO notes
-     (ownerUserId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, isDemo)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (ownerUserId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, binder, locked, lockSalt, lockHash, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, isDemo)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       req.user.id,
       String(note.noteTitle || ''),
@@ -4956,6 +5063,10 @@ app.post('/api/notes/:id/clone', requireAuth, asyncRoute(async (req, res) => {
       JSON.stringify(note.images || []),
       note.isCbox ? 1 : 0,
       JSON.stringify(note.labels || []),
+      note.binder || '',
+      note.locked ? 1 : 0,
+      note.lockSalt || '',
+      note.lockHash || '',
       note.archived ? 1 : 0,
       note.trashed ? 1 : 0,
       note.trashed ? now : null,
@@ -5031,6 +5142,8 @@ app.post('/api/notes/merge', requireAuth, asyncRoute(async (req, res) => {
   }
   const mergedBody = bodyParts.join('<br><br>');
   const mergedLabels = Array.from(labelMap.values());
+  const mergedBinder = apiNotes.find(n => n.binder)?.binder || '';
+  const mergedLock = apiNotes.find(n => n.locked && n.lockSalt && n.lockHash);
   // isCbox=true so the editor's checklist surface activates; the new editor
   // logic will additionally render the body when both are present.
   const isCbox = mergedCheckBoxes.length > 0 ? 1 : 0;
@@ -5040,8 +5153,8 @@ app.post('/api/notes/merge', requireAuth, asyncRoute(async (req, res) => {
   try {
     const result = await run(
       `INSERT INTO notes
-       (ownerUserId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, lastEditorUserId, isDemo)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, ?, ?, ?, ?, 0)`,
+       (ownerUserId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, binder, locked, lockSalt, lockHash, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, lastEditorUserId, isDemo)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, ?, ?, ?, ?, 0)`,
       [
         req.user.id,
         String(mergedTitle || ''),
@@ -5052,6 +5165,10 @@ app.post('/api/notes/merge', requireAuth, asyncRoute(async (req, res) => {
         JSON.stringify(mergedImages),
         isCbox,
         JSON.stringify(mergedLabels),
+        mergedBinder,
+        mergedLock ? 1 : 0,
+        mergedLock?.lockSalt || '',
+        mergedLock?.lockHash || '',
         Date.now(),
         now,
         now,
@@ -5224,8 +5341,67 @@ function normalizeLocationTrigger(value) {
   return ['leave', 'exit', 'depart', 'departure'].includes(trigger) ? 'leave' : 'arrive';
 }
 
+function normalizeRepeatRule(value) {
+  if (!value) return null;
+  let parsed = value;
+  if (typeof value === 'string') {
+    try { parsed = JSON.parse(value); } catch { return null; }
+  }
+  const type = String(parsed?.type || '').trim();
+  if (!['none', 'daily', 'weekly', 'monthly', 'custom_days'].includes(type)) return null;
+  const intervalDays = Number(parsed.intervalDays || 0);
+  if (type === 'none' && !parsed.moveToTopOnTrigger) return null;
+  return JSON.stringify({
+    type,
+    ...(type === 'custom_days' ? { intervalDays: Number.isFinite(intervalDays) && intervalDays > 0 ? Math.floor(intervalDays) : 1 } : {}),
+    moveToTopOnTrigger: !!parsed.moveToTopOnTrigger
+  });
+}
+
+function parseRepeatRule(value) {
+  if (!value) return null;
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    const normalized = normalizeRepeatRule(parsed);
+    return normalized ? JSON.parse(normalized) : null;
+  } catch {
+    return null;
+  }
+}
+
+function nextRepeatDueAt(dueAtUtc, repeatRule) {
+  if (!dueAtUtc || !repeatRule) return null;
+  if (repeatRule.type === 'none') return null;
+  const next = new Date(dueAtUtc);
+  if (Number.isNaN(next.getTime())) return null;
+  const now = Date.now();
+  let guard = 0;
+  while (next.getTime() <= now && guard < 730) {
+    guard += 1;
+    if (repeatRule.type === 'daily') next.setUTCDate(next.getUTCDate() + 1);
+    else if (repeatRule.type === 'weekly') next.setUTCDate(next.getUTCDate() + 7);
+    else if (repeatRule.type === 'monthly') next.setUTCMonth(next.getUTCMonth() + 1);
+    else next.setUTCDate(next.getUTCDate() + Math.max(1, Number(repeatRule.intervalDays || 1)));
+  }
+  return next.toISOString();
+}
+
+async function floatReminderNoteToTop(userId, noteId) {
+  if (!userId || !noteId) return;
+  const note = await getAccessibleNote(noteId, userId);
+  if (!note || note.trashed || note.archived) return;
+  await run(
+    'INSERT OR REPLACE INTO user_note_positions (userId, noteId, sortOrder) VALUES (?, ?, ?)',
+    [userId, noteId, Date.now()]
+  );
+  broadcastRealtime([userId], { type: 'notes-changed', action: 'reordered' });
+}
+
 function normalizeReminderPayload(body = {}, existing = {}) {
   const location = body.location && typeof body.location === 'object' ? body.location : {};
+  const repeatRuleRaw = Object.prototype.hasOwnProperty.call(body, 'repeatRule') || Object.prototype.hasOwnProperty.call(body, 'repeat_rule')
+    ? firstDefined(body.repeatRule, body.repeat_rule)
+    : existing.repeatRule;
   const noteIdRaw = firstDefined(body.noteId, body.note_id, body.noteID, body.note?.id, existing.noteId);
   const locationNameRaw = firstDefined(
     body.locationName,
@@ -5252,7 +5428,7 @@ function normalizeReminderPayload(body = {}, existing = {}) {
     noteId: Number(noteIdRaw || 0) || null,
     dueAtUtc: dueRaw ? String(dueRaw) : null,
     timezone: String(firstDefined(body.timezone, body.timeZone, existing.timezone, 'UTC') || 'UTC'),
-    repeatRule: firstDefined(body.repeatRule, body.repeat_rule, existing.repeatRule) || null,
+    repeatRule: normalizeRepeatRule(repeatRuleRaw),
     status: firstDefined(body.status, existing.status, 'pending'),
     title: plainText(firstDefined(body.title, body.notificationTitle, existing.title) || '') || null,
     body: plainText(firstDefined(body.body, body.notificationBody, body.text, existing.body) || '') || null,
@@ -5653,8 +5829,13 @@ app.patch('/api/reminders/:id', requireAuth, asyncRoute(async (req, res) => {
   const longitude = payload.longitude;
   const radiusMeters = payload.radiusMeters;
   const locationTrigger = payload.locationTrigger;
+  const repeatRule = payload.repeatRule;
+  const repeat = status === 'fired' ? parseRepeatRule(repeatRule) : null;
+  const rolledDueAtUtc = repeat ? nextRepeatDueAt(dueAtUtc, repeat) : null;
+  const finalStatus = rolledDueAtUtc ? 'pending' : status;
+  const finalDueAtUtc = rolledDueAtUtc || dueAtUtc;
 
-  if (!dueAtUtc && !locationName) return res.status(400).json({ error: 'Either dueAtUtc or locationName is required.' });
+  if (!finalDueAtUtc && !locationName) return res.status(400).json({ error: 'Either dueAtUtc or locationName is required.' });
   if (locationName && (latitude == null || longitude == null)) {
     return res.status(400).json({ error: 'Location reminders require locationName, latitude, and longitude.' });
   }
@@ -5664,16 +5845,17 @@ app.patch('/api/reminders/:id', requireAuth, asyncRoute(async (req, res) => {
 
   await run(
     `UPDATE reminders SET
-       status = ?, dueAtUtc = ?, locationName = ?, latitude = ?, longitude = ?, radiusMeters = ?, locationTrigger = ?, updatedAt = ?,
+       status = ?, dueAtUtc = ?, repeatRule = ?, locationName = ?, latitude = ?, longitude = ?, radiusMeters = ?, locationTrigger = ?, updatedAt = ?,
        lwwPhysicalMs = ?, lwwLogical = ?, lwwDeviceId = ?, lwwOperationId = ?,
        syncId = CASE WHEN syncId IS NULL OR syncId = '' THEN ? ELSE syncId END
      WHERE id = ?`,
-    [status, dueAtUtc, locationName, latitude, longitude, radiusMeters, locationTrigger, now, stamp.physicalMs, stamp.logical, stamp.deviceId, stamp.operationId, `reminder-${crypto.randomUUID()}`, reminder.id]
+    [finalStatus, finalDueAtUtc, repeatRule, locationName, latitude, longitude, radiusMeters, locationTrigger, now, stamp.physicalMs, stamp.logical, stamp.deviceId, stamp.operationId, `reminder-${crypto.randomUUID()}`, reminder.id]
   );
   const updated = await get('SELECT * FROM reminders WHERE id = ?', [reminder.id]);
   await recordReminderSyncChange(updated, 'upsert');
   const enrichedUpdated = await enrichReminderResponse(updated);
-  if (status === 'pending') {
+  if ((rolledDueAtUtc || finalStatus === 'fired') && repeat?.moveToTopOnTrigger) await floatReminderNoteToTop(req.user.id, reminder.noteId);
+  if (finalStatus === 'pending') {
     const caldav = await get('SELECT * FROM caldav_settings WHERE userId = ? AND enabled = 1', [req.user.id]);
     if (caldav) pushReminderToCaldav(caldav, enrichedUpdated).catch(err => console.error('CalDAV push failed:', err.message));
     gcalPushReminder(req.user.id, enrichedUpdated).catch(err => console.error('GCal push failed:', err.message));
@@ -6648,8 +6830,8 @@ app.post('/api/import/google-takeout', requireAuth, uploadZip.single('takeout'),
         // treating the import itself as the note date.
         const importSortOrder = new Date(updatedAt || createdAt || now).getTime() || Date.now();
         const insertResult = await run(
-          `INSERT INTO notes (ownerUserId, noteTitle, noteBody, pinned, bgColor, bgImage, checkBoxes, images, isCbox, labels, archived, trashed, sortOrder, createdAt, updatedAt)
-           VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+          `INSERT INTO notes (ownerUserId, noteTitle, noteBody, pinned, bgColor, bgImage, checkBoxes, images, isCbox, labels, binder, archived, trashed, sortOrder, createdAt, updatedAt)
+           VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, '', ?, 0, ?, ?, ?)`,
           [req.user.id, noteTitle, noteBody, pinnedFlag, bgColor,
            JSON.stringify(checkBoxes), JSON.stringify(images), isCbox, JSON.stringify(labels),
            archivedFlag, importSortOrder, createdAt, updatedAt]

@@ -41,6 +41,7 @@ export class NavbarComponent implements OnInit {
   isProfileOpen = false
   profileError = ''
   labelMenuError = ''
+  binderMenuError = ''
   avatarPreview = ''
   avatarPresetPreview = 'cat'
   newPassword = ''
@@ -76,6 +77,14 @@ export class NavbarComponent implements OnInit {
 
   get canSetSelectedReminder() {
     return this.selectedCount === 1
+  }
+
+  get isBinderRoute() {
+    return this.router.url.split('?')[0].split('#')[0].startsWith('/binder/')
+  }
+
+  setSearchScope(scope: 'all' | 'current') {
+    this.Shared.setSearchScope(scope)
   }
 
   closeSideBar() { this.Shared.closeSideBar.next(true) }
@@ -214,12 +223,42 @@ export class NavbarComponent implements OnInit {
         this.labelMenuError = ''
         this.Shared.createTooltip(this.selectionMoreButton!, labelTooltipEl)
       },
+      openBinderMenu: (binderTooltipEl: HTMLDivElement, labelTooltipEl?: HTMLDivElement) => {
+        this.Shared.closeTooltip(tooltipEl)
+        if (labelTooltipEl) this.Shared.closeTooltip(labelTooltipEl)
+        this.binderMenuError = ''
+        this.Shared.createTooltip(this.selectionMoreButton!, binderTooltipEl)
+      },
       openMerge: () => {
         this.Shared.closeTooltip(tooltipEl)
         this.openMergeDialog()
       }
     }
     return actions
+  }
+
+  async setSelectionBinder(name: string, tooltipEl?: HTMLDivElement) {
+    await this.Shared.bulkApplyBinder(name)
+    this.Shared.clearNoteSelection()
+    if (tooltipEl) this.Shared.closeTooltip(tooltipEl)
+  }
+
+  async addBinderFromMenu(input: HTMLInputElement) {
+    const name = input.value.trim()
+    if (!name) return
+    try {
+      await this.Shared.binder.db.add(name)
+      await this.Shared.bulkApplyBinder(name)
+      input.value = ''
+      this.binderMenuError = ''
+    } catch {
+      this.binderMenuError = 'Could not create binder'
+    }
+  }
+
+  isSelectedBinder(name: string) {
+    const selected = this.Shared.note.all.filter(note => note.id && this.Shared.selectedNoteIds.value.includes(note.id))
+    return !!selected.length && selected.every(note => (note.binder || '') === (name || ''))
   }
 
   // Merge dialog state. Snapshots the visible-grid order of currently

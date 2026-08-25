@@ -107,7 +107,16 @@
       padding-top: 8px;
     }
 
-    .sidenav-labels .item.is-label {
+    .sidenav-binders {
+      align-items: center;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      padding: 8px 0;
+    }
+
+    .sidenav-labels .item.is-label,
+    .sidenav-binders .item.is-binder {
       background: #f1f3f4;
       border: 1px solid rgba(95, 99, 104, 0.12);
       border-radius: 14px 7px 7px 14px;
@@ -132,7 +141,8 @@
         width: 4px;
       }
 
-      .pic.label {
+      .pic.label,
+      .material-pic {
         display: none;
       }
 
@@ -236,6 +246,11 @@
         background-color: #3c4043;
         opacity: 0.87;
       }
+
+      .material-pic {
+        color: #3c4043;
+        opacity: 0.87;
+      }
     }
 
     &:hover:not(.active) {
@@ -270,6 +285,31 @@
   .install-section,
   .sidebar-branding {
     flex: 0 0 auto;
+  }
+
+  .sidenav-binders {
+    padding: 2px 0 8px;
+  }
+
+  .sidenav-binders-header .binder-section-icon {
+    color: #9aa0a6;
+    font-size: 21px;
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  }
+
+  .item.is-binder .binder-row-icon {
+    color: currentColor;
+    font-size: 23px;
+    font-variation-settings: 'FILL' 0, 'wght' 500, 'GRAD' 0, 'opsz' 24;
+    opacity: 0.78;
+  }
+
+  .item.is-binder .binder-row-icon {
+    visibility: hidden;
+  }
+
+  .sidenav-binders:empty {
+    display: none;
   }
 
   .sidenav-labels-header {
@@ -1101,6 +1141,59 @@
 .disabled {
   cursor: not-allowed !important;
   opacity: 0.25;
+}
+
+// Keep nav label/binder editing as a compact dialog on phones. The old mobile
+// rule expanded this to a full-screen sheet, which collided with the sticky
+// mobile navbar and floating actions.
+.modal-container {
+  align-items: center;
+  justify-content: center;
+
+  .modal {
+    border-radius: 12px;
+    height: auto;
+    left: 50%;
+    max-height: min(560px, calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 48px));
+    max-width: min(360px, calc(100vw - 32px));
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: min(360px, calc(100vw - 32px));
+
+    @media (max-width: 599px) {
+      border-radius: 12px;
+      height: auto;
+      max-height: min(520px, calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 48px));
+      max-width: calc(100vw - 32px);
+      top: 50%;
+      transform: translate(-50%, -50%);
+      width: calc(100vw - 32px);
+    }
+  }
+
+  .label-modal-main {
+    border-radius: 12px;
+    max-height: inherit;
+
+    .label-list {
+      max-height: min(340px, 52dvh);
+    }
+
+    @media (max-width: 599px) {
+      .header {
+        padding: 14px 14px 6px;
+      }
+
+      .label-list {
+        max-height: min(300px, 46dvh);
+        padding: 0 14px 4px;
+      }
+
+      .footer {
+        padding: 8px 10px;
+      }
+    }
+  }
 }
 
 :host-context(.light-theme) {

@@ -66,6 +66,16 @@
               </button>
               @if (isFiltersOpen) {
                 <div class="filters-dropdown" (click)="$event.stopPropagation()">
+                  @if (isBinderRoute) {
+                    <div class="dropdown-header">Search scope</div>
+                    <div class="scope-row">
+                      <button type="button" [class.active]="Shared.searchScope.value === 'all'"
+                        (click)="setSearchScope('all')">All notes</button>
+                      <button type="button" [class.active]="Shared.searchScope.value === 'current'"
+                        (click)="setSearchScope('current')">This binder</button>
+                    </div>
+                  }
+
                   <div class="dropdown-header">Quick Filters</div>
                   
                   <div class="filter-item" [class.active]="isFilterActive('!image')" (click)="toggleFilter('!image')">
@@ -247,6 +257,7 @@
 <div #selectionMoreTt data-tooltip="true" data-is-tooltip-open="false" class="moreMenu selectionMoreMenu">
   <div (click)="selectionMoreMenu(selectionMoreTt).trash()">Delete note</div>
   <div (click)="selectionMoreMenu(selectionMoreTt).openLabelMenu(labelMenuTt)">Add label</div>
+  <div (click)="selectionMoreMenu(selectionMoreTt).openBinderMenu(binderMenuTt,labelMenuTt)">Move to binder</div>
   <div (click)="selectionMoreMenu(selectionMoreTt).clone()">Make a copy</div>
   <div (click)="selectionMoreMenu(selectionMoreTt).openMerge()">Merge…</div>
 </div>
@@ -262,10 +273,10 @@
 <div #labelMenuTt data-tooltip="true" data-is-tooltip-open="false" class="labelMenu">
   <div class="title">Label note</div>
   <div class="search">
+    <div class="search-icon"></div>
     <input #newLabelInput type="text" maxlength="50" placeholder="Enter label name"
       (keydown.enter)="addLabelFromMenu(newLabelInput); $event.preventDefault()" (blur)="addLabelFromMenu(newLabelInput)"
       (input)="labelMenuError=''">
-    <div class="search-icon"></div>
   </div>
   @if (newLabelInput.value.trim().length) {
     <div class="label-list create-label" (mousedown)="$event.preventDefault()" (click)="addLabelFromMenu(newLabelInput)">
@@ -281,6 +292,36 @@
       <div class="label-list" (click)="labelMenu(label)">
         <div [class.done]='isSelectedLabel(label)' class="check-icon"></div>
         <div class="label-name">{{label.name}}</div>
+      </div>
+    }
+  </div>
+</div>
+
+<div #binderMenuTt data-tooltip="true" data-is-tooltip-open="false" class="labelMenu binderMenu">
+  <div class="title">Move to binder</div>
+  <div class="search">
+    <input #newBinderInput type="text" maxlength="50" placeholder="Enter binder name"
+      (keydown.enter)="addBinderFromMenu(newBinderInput); $event.preventDefault()" (blur)="addBinderFromMenu(newBinderInput)"
+      (input)="binderMenuError=''">
+  </div>
+  @if (newBinderInput.value.trim().length) {
+    <div class="label-list create-label" (mousedown)="$event.preventDefault()" (click)="addBinderFromMenu(newBinderInput)">
+      <div class="check-icon"></div>
+      <div class="label-name">Create "{{newBinderInput.value.trim()}}"</div>
+    </div>
+  }
+  @if (binderMenuError) {
+    <div class="label-error">{{binderMenuError}}</div>
+  }
+  <div class="label-list-container">
+    <div class="label-list" (click)="setSelectionBinder('', binderMenuTt)">
+      <div [class.done]='isSelectedBinder("")' class="check-icon"></div>
+      <div class="label-name">No binder</div>
+    </div>
+    @for (binder of Shared.binder.list; track binder.name) {
+      <div class="label-list" (click)="setSelectionBinder(binder.name, binderMenuTt)">
+        <div [class.done]='isSelectedBinder(binder.name)' class="check-icon"></div>
+        <div class="label-name">{{binder.name}}</div>
       </div>
     }
   </div>

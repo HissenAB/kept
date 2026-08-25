@@ -4,7 +4,7 @@ import { Capacitor, registerPlugin } from '@capacitor/core';
 import { BehaviorSubject, firstValueFrom, Subject } from 'rxjs';
 import { environment } from 'src/environments/environment';
 import { AuthService } from './auth.service';
-import { CalDavSettingsI, GoogleCalendarStatusI, IcsFeedI, ReminderFiredPayload, ReminderI, ReminderStatus } from '../interfaces/reminder';
+import { CalDavSettingsI, GoogleCalendarStatusI, IcsFeedI, ReminderFiredPayload, ReminderI, ReminderRepeatRule, ReminderStatus } from '../interfaces/reminder';
 import { PushNotificationService } from './push-notification.service';
 import { OfflineStoreService } from './offline-store.service';
 import { OfflineSyncService } from './offline-sync.service';
@@ -17,6 +17,7 @@ type ReminderCreateData = {
   title?: string;
   body?: string;
   imageUrl?: string;
+  repeatRule?: string | ReminderRepeatRule | null;
   locationName?: string;
   latitude?: number;
   longitude?: number;
@@ -27,6 +28,7 @@ type ReminderCreateData = {
 type ReminderUpdateData = {
   status?: ReminderStatus;
   dueAtUtc?: string;
+  repeatRule?: string | ReminderRepeatRule | null;
   locationName?: string;
   latitude?: number;
   longitude?: number;
@@ -149,6 +151,7 @@ export class ReminderService {
       const note = await this.offlineStore.getNote(this.offlineSync.partition, data.noteId);
       data = { ...data, noteSyncId: note?.syncId };
     }
+    const payload = { ...data, repeatRule: this.serializeRepeatRule(data.repeatRule) };
     const now = new Date().toISOString();
     let localId = -Date.now();
     if (this.offlineSync.partition) {
@@ -162,7 +165,7 @@ export class ReminderService {
       userId: this.auth.currentUser?.id || 0,
       dueAtUtc: data.dueAtUtc || null,
       timezone: data.timezone || 'UTC',
-      repeatRule: null,
+      repeatRule: this.serializeRepeatRule(data.repeatRule),
       status: 'pending' as ReminderStatus,
       title: data.title || null,
       body: data.body || null,
@@ -184,7 +187,7 @@ export class ReminderService {
     }
     try {
       const reminder = await firstValueFrom(
-        this.http.post<ReminderI>(`${this.apiUrl}/reminders`, { ...data, syncId: local.syncId }, { headers: this.auth.authHeaders() })
+        this.http.post<ReminderI>(`${this.apiUrl}/reminders`, { ...payload, syncId: local.syncId }, { headers: this.auth.authHeaders() })
       );
       if (this.offlineSync.partition) await this.offlineStore.putReminder(this.offlineSync.partition, reminder);
       await this.load();
@@ -200,9 +203,13 @@ export class ReminderService {
   }
 
   async update(id: number, data: ReminderUpdateData) {
+    const payload: ReminderUpdateData = { ...data };
+    if (Object.prototype.hasOwnProperty.call(data, 'repeatRule')) {
+      payload.repeatRule = this.serializeRepeatRule(data.repeatRule);
+    }
     const existing = this.reminders$.value.find(reminder => reminder.id === id);
     if (existing) {
-      const local = { ...existing, ...data, updatedAt: new Date().toISOString() };
+      const local: ReminderI = { ...existing, ...payload, repeatRule: payload.repeatRule === undefined ? existing.repeatRule : payload.repeatRule as string | null, updatedAt: new Date().toISOString() };
       if (this.offlineSync.partition) await this.offlineStore.putReminder(this.offlineSync.partition, local);
       this.setReminders(this.reminders$.value.map(reminder => reminder.id === id ? local : reminder));
       if (id < 0 || !navigator.onLine) {
@@ -211,7 +218,7 @@ export class ReminderService {
       }
     }
     const reminder = await firstValueFrom(
-      this.http.patch<ReminderI>(`${this.apiUrl}/reminders/${id}`, data, { headers: this.auth.authHeaders() })
+      this.http.patch<ReminderI>(`${this.apiUrl}/reminders/${id}`, payload, { headers: this.auth.authHeaders() })
     );
     await this.load();
     return reminder;
@@ -269,10 +276,24 @@ export class ReminderService {
     const reminder = this.reminders$.value.find(r => r.id === payload.reminderId);
     if (reminder?.status === 'fired') return;
     this.firedReminder$.next(payload);
+    const repeat = this.parseRepeatRule(reminder?.repeatRule);
+    if (this.isRepeatingRule(repeat)) {
+      this.load().catch(console.error);
+      return;
+    }
     const updated = this.reminders$.value.map(r =>
       r.id === payload.reminderId ? { ...r, status: 'fired' as ReminderStatus } : r
     );
     this.setReminders(updated);
+  }
+
+  async dismissFiredReminder(reminderId: number) {
+    const reminder = this.reminders$.value.find(r => r.id === reminderId);
+    if (this.isRepeatingRule(this.parseRepeatRule(reminder?.repeatRule))) {
+      if (navigator.onLine) await this.load().catch(console.error);
+      return reminder || null;
+    }
+    return this.update(reminderId, { status: 'dismissed' });
   }
 
   debugFireReminder(title = 'Debug reminder', body = 'This is a manual test reminder.') {
@@ -374,10 +395,12 @@ export class ReminderService {
       });
   }
 
-  private fireLocalReminder(reminderId: number) {
+  private async fireLocalReminder(reminderId: number) {
     this.reminderTimers.delete(reminderId);
     const reminder = this.reminders$.value.find(r => r.id === reminderId);
     if (!reminder || reminder.status !== 'pending') return;
+    const repeat = this.parseRepeatRule(reminder.repeatRule);
+    const nextDueAtUtc = repeat ? this.nextRepeatDueAt(reminder.dueAtUtc, repeat) : null;
 
     this.firedReminder$.next({
       reminderId: reminder.id,
@@ -388,10 +411,88 @@ export class ReminderService {
       source: 'local'
     });
 
+    if (repeat && nextDueAtUtc) {
+      const local = { ...reminder, dueAtUtc: nextDueAtUtc, status: 'pending' as ReminderStatus, updatedAt: new Date().toISOString() };
+      if (this.offlineSync.partition) await this.offlineStore.putReminder(this.offlineSync.partition, local);
+      this.setReminders(this.reminders$.value.map(r => r.id === reminderId ? local : r));
+      if (repeat.moveToTopOnTrigger) await this.floatNoteToTop(reminder.noteId).catch(console.error);
+      this.update(reminderId, { dueAtUtc: nextDueAtUtc, status: 'pending', repeatRule: reminder.repeatRule }).catch(console.error);
+      return;
+    }
+
+    if (repeat?.moveToTopOnTrigger) await this.floatNoteToTop(reminder.noteId).catch(console.error);
+
     this.setReminders(this.reminders$.value.map(r =>
       r.id === reminderId ? { ...r, status: 'fired' as ReminderStatus } : r
     ));
     this.update(reminderId, { status: 'fired' }).catch(console.error);
+  }
+
+  private parseRepeatRule(value: string | ReminderRepeatRule | null | undefined): ReminderRepeatRule | null {
+    if (!value) return null;
+    let parsed: any = value;
+    if (typeof value === 'string') {
+      try { parsed = JSON.parse(value); } catch { return null; }
+    }
+    const type = parsed?.type;
+    if (!['none', 'daily', 'weekly', 'monthly', 'custom_days'].includes(type)) return null;
+    const intervalDays = Number(parsed.intervalDays || 0);
+    if (type === 'none' && !parsed.moveToTopOnTrigger) return null;
+    return {
+      type,
+      intervalDays: type === 'custom_days' && Number.isFinite(intervalDays) && intervalDays > 0 ? Math.floor(intervalDays) : undefined,
+      moveToTopOnTrigger: !!parsed.moveToTopOnTrigger
+    };
+  }
+
+  private serializeRepeatRule(value: string | ReminderRepeatRule | null | undefined) {
+    const parsed = this.parseRepeatRule(value);
+    return parsed ? JSON.stringify(parsed) : null;
+  }
+
+  private isRepeatingRule(repeat: ReminderRepeatRule | null) {
+    return !!repeat && repeat.type !== 'none';
+  }
+
+  private nextRepeatDueAt(dueAtUtc: string | null, repeat: ReminderRepeatRule) {
+    if (!dueAtUtc) return null;
+    if (repeat.type === 'none') return null;
+    const next = new Date(dueAtUtc);
+    if (Number.isNaN(next.getTime())) return null;
+    const now = Date.now();
+    let guard = 0;
+    while (next.getTime() <= now && guard < 730) {
+      guard += 1;
+      if (repeat.type === 'daily') next.setUTCDate(next.getUTCDate() + 1);
+      else if (repeat.type === 'weekly') next.setUTCDate(next.getUTCDate() + 7);
+      else if (repeat.type === 'monthly') next.setUTCMonth(next.getUTCMonth() + 1);
+      else next.setUTCDate(next.getUTCDate() + Math.max(1, Number(repeat.intervalDays || 1)));
+    }
+    return next.toISOString();
+  }
+
+  private async floatNoteToTop(noteId: number | null) {
+    if (!noteId || !this.offlineSync.partition) return;
+    const notes = await this.offlineStore.listNotes(this.offlineSync.partition);
+    const note = notes.find(item => item.id === noteId);
+    if (!note?.syncId) return;
+    const sorted = notes
+      .filter(item => item.id && item.syncId && item.id !== noteId)
+      .sort((a, b) => Number(b.pinned) - Number(a.pinned) || Number(b.sortOrder || 0) - Number(a.sortOrder || 0));
+    const ids = [noteId, ...sorted.map(item => item.id!)];
+    const base = Date.now();
+    for (let index = 0; index < ids.length; index += 1) {
+      const current = notes.find(item => item.id === ids[index]);
+      if (!current?.syncId) continue;
+      await this.offlineStore.putNote(this.offlineSync.partition, {
+        ...current,
+        sortOrder: base + ids.length - index,
+        updatedAt: new Date().toISOString()
+      });
+    }
+    await this.offlineSync.enqueue('note.reorder', `order-${this.auth.currentUser?.id || 0}`, {
+      syncIds: ids.map(id => notes.find(item => item.id === id)?.syncId).filter(Boolean)
+    });
   }
 
   private listenForServiceWorkerMessages() {

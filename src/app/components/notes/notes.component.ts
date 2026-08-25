@@ -10,10 +10,12 @@ import { ActivationEnd, NavigationEnd, Router } from '@angular/router';
 import { AuthService } from 'src/app/services/auth.service';
 import { ShareUserI } from 'src/app/interfaces/users';
 import { ReminderService } from 'src/app/services/reminder.service';
+import { ReminderRepeatRule, ReminderRepeatType } from 'src/app/interfaces/reminder';
 import { NotesService } from 'src/app/services/notes.service';
 import { TimepickerUI, type ConfirmEventData } from 'timepicker-ui';
 import { NotesToolsPipe } from 'src/app/pipes/notes-tools.pipe';
 import { isNativePhonePlatform, shouldUseFullscreenNoteEditor } from 'src/app/utils/platform';
+import { NoteLockService } from 'src/app/services/note-lock.service';
 
 declare var Snackbar: any;
 type NoteBodySegment = { type: 'html'; value: string } | { type: 'url'; value: string }
@@ -29,7 +31,7 @@ type NoteMeta = { rawBody: string; title: string; bgKey: string; urls: string[];
 export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
   activeNote: NoteI | null = null
   readonly nativePhoneLayout = isNativePhonePlatform()
-  constructor(public Shared: SharedService, private router: Router, public auth: AuthService, public reminderService: ReminderService, private zone: NgZone, public notesService: NotesService, private cd: ChangeDetectorRef, private notesTools: NotesToolsPipe) { }
+  constructor(public Shared: SharedService, private router: Router, public auth: AuthService, public reminderService: ReminderService, private zone: NgZone, public notesService: NotesService, private cd: ChangeDetectorRef, private notesTools: NotesToolsPipe, public noteLock: NoteLockService) { }
 
   private subscriptions: Subscription[] = []
 
@@ -47,12 +49,14 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
     archive: false,
     trash: false,
     label: undefined as string | undefined,
+    binder: undefined as string | undefined,
     reminders: false,
     shared: false,
     attachments: false
   }
   currentPageName = ''
   labels: LabelI[] = []
+  binderName = ''
   bgColors = bgColors
   bgImages = bgImages
   bgImageLabels: Record<string, string> = {
@@ -77,6 +81,7 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
   selectedCollaboratorIds: number[] = []
   collaboratorError = ''
   labelMenuError = ''
+  binderMenuError = ''
   isSavingCollaborators = false
   openImagePickerOnModal = false
   activePickerNoteId: number | null = null
@@ -95,6 +100,16 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
   customTime = ''
   readonly calendarWeekdays = ['S', 'M', 'T', 'W', 'T', 'F', 'S']
   calendarMonth = this.startOfMonth(new Date())
+  reminderRepeatType: ReminderRepeatType = 'none'
+  reminderRepeatCustomDays = 2
+  reminderMoveToTopOnTrigger = false
+  readonly reminderRepeatOptions: Array<{ value: ReminderRepeatType; label: string }> = [
+    { value: 'none', label: 'None' },
+    { value: 'daily', label: 'Daily' },
+    { value: 'weekly', label: 'Weekly' },
+    { value: 'monthly', label: 'Monthly' },
+    { value: 'custom_days', label: '...' }
+  ]
   private customTimePicker?: TimepickerUI
   private customTimePickerInput?: HTMLInputElement
   private timePickerNote?: NoteI
@@ -188,6 +203,38 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
     if (!note.isCbox) return false
     const text = (note.noteBody || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim()
     return text.length > 0
+  }
+
+  overviewChecklistPreview(items: CheckboxI[] = []) {
+    const visible: CheckboxI[] = []
+    const maxRows = 7
+    const lineBudget = 11
+    let usedLines = 0
+
+    for (const item of items) {
+      const lines = this.overviewChecklistLineCost(item)
+      if (visible.length && (visible.length >= maxRows || usedLines + lines > lineBudget)) break
+      visible.push(item)
+      usedLines += lines
+    }
+
+    return {
+      items: visible,
+      more: Math.max(0, items.length - visible.length)
+    }
+  }
+
+  private overviewChecklistLineCost(item: CheckboxI) {
+    const length = this.htmlPlainText(item.data).length
+    if (length <= 34) return 1
+    if (length <= 72) return 2
+    return 3
+  }
+
+  private htmlPlainText(value?: string | null) {
+    const div = document.createElement('div')
+    div.innerHTML = String(value || '')
+    return (div.textContent || div.innerText || '').replace(/\s+/g, ' ').trim()
   }
 
   private noteMeta(note: NoteI) {
@@ -360,6 +407,7 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
     this.currentPage.reminders = url.includes('reminders')
     this.currentPage.attachments = url.includes('attachments')
     this.currentPage.label = this.labelNameFromUrl(url)
+    this.currentPage.binder = this.binderNameFromUrl(url)
     this.updateCurrentPageName()
   }
 
@@ -374,8 +422,19 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
     }
   }
 
+  private binderNameFromUrl(url: string) {
+    const path = url.split('?')[0].split('#')[0]
+    const match = path.match(/\/binder\/([^/]+)/)
+    if (!match) return undefined
+    try {
+      return decodeURIComponent(match[1])
+    } catch {
+      return match[1]
+    }
+  }
+
   private updateCurrentPageName() {
-    this.currentPageName = this.currentPage.label ? this.currentPage.label : this.currentPage.archive ? 'archived' : (this.currentPage.trash ? 'trashed' : this.currentPage.reminders ? 'reminders' : this.currentPage.attachments ? 'attachments' : this.currentPage.shared ? 'shared' : 'home')
+    this.currentPageName = this.currentPage.binder ? `binder:${this.currentPage.binder}` : this.currentPage.label ? this.currentPage.label : this.currentPage.archive ? 'archived' : (this.currentPage.trash ? 'trashed' : this.currentPage.reminders ? 'reminders' : this.currentPage.attachments ? 'attachments' : this.currentPage.shared ? 'shared' : 'home')
   }
 
   private parseColor(color: string) {
@@ -477,6 +536,7 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
       + '|' + this.Shared.noteViewType.value
       + '|' + this.currentPageName
       + '|' + this.Shared.searchQuery
+      + '|' + this.Shared.searchScope.value
       + '|' + this.visibleNoteLimit
       + '|' + (this.mainContainer?.nativeElement?.clientWidth || 0)
       + '|' + (window?.innerWidth || 0)
@@ -505,7 +565,7 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
   }
 
   private pageNotes() {
-    return this.notesTools.transform(this.Shared.note.all || [], this.currentPageName, this.Shared.searchQuery)
+    return this.notesTools.transform(this.Shared.note.all || [], this.currentPageName, this.Shared.searchQuery, this.Shared.searchScope.value)
   }
 
   private maybeBackfillFilteredPage() {
@@ -577,7 +637,7 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
         this.smartCaptureLayoutQueued = false
         this.pendingSmartCaptureReloadSettle = false
         const sourceNotes = notes || this.Shared.note.all || []
-        const currentPageCount = this.notesTools.transform(sourceNotes, this.currentPageName, this.Shared.searchQuery).length
+        const currentPageCount = this.notesTools.transform(sourceNotes, this.currentPageName, this.Shared.searchQuery, this.Shared.searchScope.value).length
         if (currentPageCount) {
           const firstPageTarget = Math.min(currentPageCount, this.noteRenderChunk * 2)
           this.visibleNoteLimit = Math.max(this.visibleNoteLimit, firstPageTarget, this.initialNoteRenderChunk)
@@ -612,6 +672,8 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
       this.Shared.toggleNoteSelection(noteData.id!)
       return
     }
+    const canOpen = await this.noteLock.ensureUnlocked(noteData)
+    if (!canOpen) return
     this.openImagePickerOnModal = openImagePicker
     this.Shared.note.id = noteData.id!
     this.clickedNoteEl = clickedNote
@@ -1391,6 +1453,37 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
       clone: () => {
         this.Shared.note.db.clone()
       },
+      lock: async () => {
+        if (!this.canManageActiveNoteLock()) return
+        const note = this.activeNote!
+        const fields = await this.noteLock.createLockFields()
+        if (!fields) return
+        await this.notesService.updateKey(fields, note.id!)
+        Object.assign(note, fields)
+        this.noteLock.markUnlocked(note)
+      },
+      changeLock: async () => {
+        if (!this.canManageActiveNoteLock()) return
+        const note = this.activeNote!
+        const fields = await this.noteLock.changeLockFields(note)
+        if (!fields) return
+        await this.notesService.updateKey(fields, note.id!)
+        Object.assign(note, fields)
+        this.noteLock.markUnlocked(note)
+      },
+      removeLock: async () => {
+        if (!this.canManageActiveNoteLock()) return
+        const note = this.activeNote!
+        const fields = await this.noteLock.removeLockFields(note)
+        if (!fields) return
+        await this.notesService.updateKey(fields, note.id!)
+        Object.assign(note, fields)
+      },
+      relock: () => {
+        if (!this.activeNote?.locked) return
+        this.noteLock.clearUnlocked(this.activeNote)
+        this.scheduleBuildMasonry(true)
+      },
       openLabelMenu: (tooltipEl: HTMLDivElement) => {
         this.labels = JSON.parse(JSON.stringify(this.Shared.label.list))
         this.labelMenuError = ''
@@ -1401,10 +1494,20 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
             if (label) label.added = noteLabel.added
           })
         })
+      },
+      openBinderMenu: (tooltipEl: HTMLDivElement, labelTooltipEl?: HTMLDivElement) => {
+        if (labelTooltipEl) this.Shared.closeTooltip(labelTooltipEl)
+        this.binderName = this.activeNote?.binder || ''
+        this.binderMenuError = ''
+        this.Shared.createTooltip(this.Ttbutton!, tooltipEl)
       }
     }
     this.Shared.closeTooltip(tooltipEl)
     return actions
+  }
+
+  canManageActiveNoteLock() {
+    return !!(this.activeNote?.id && (!this.activeNote.ownerUserId || this.activeNote.ownerUserId === this.auth.currentUser?.id))
   }
 
   colorMenu = {
@@ -1451,6 +1554,30 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
       }
       this.labelMenuError = error?.status === 409 ? 'Label already exists' : 'Could not create label'
     }
+  }
+
+  async addBinderFromMenu(input: HTMLInputElement) {
+    const name = input.value.trim()
+    if (!name || !this.activeNote?.id) return
+    const existing = this.Shared.binder.list.find(binder => binder.name.toLowerCase() === name.toLowerCase())
+    try {
+      if (!existing) await this.Shared.binder.db.add(name)
+      this.binderName = existing?.name || name
+      input.value = ''
+      this.binderMenuError = ''
+      await this.Shared.note.db.updateKey({ binder: this.binderName })
+      this.activeNote.binder = this.binderName
+    } catch {
+      this.binderMenuError = 'Could not create binder'
+    }
+  }
+
+  async setBinderFromMenu(name: string, tooltipEl?: HTMLDivElement) {
+    if (!this.activeNote?.id) return
+    this.binderName = String(name || '').trim()
+    await this.Shared.note.db.updateKey({ binder: this.binderName })
+    this.activeNote.binder = this.binderName
+    if (tooltipEl) this.Shared.closeTooltip(tooltipEl)
   }
 
   async openCollaboratorMenu(button: HTMLDivElement, tooltipEl: HTMLDivElement, note: NoteI) {
@@ -1647,6 +1774,7 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
       this.customDate = ''
       this.customTime = ''
       this.calendarMonth = this.startOfMonth(new Date())
+      this.resetReminderRepeatState()
       this.destroyTimePicker()
       document.removeEventListener('mousedown', this.pickerOutsideHandler)
       setTimeout(() => document.addEventListener('mousedown', this.pickerOutsideHandler), 0)
@@ -1763,6 +1891,29 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
     this.customDate = date
   }
 
+  setReminderRepeatType(type: ReminderRepeatType) {
+    this.reminderRepeatType = type
+    if (type !== 'custom_days') this.reminderRepeatCustomDays = 2
+  }
+
+  private selectedReminderRepeatRule(): ReminderRepeatRule | null {
+    if (this.reminderRepeatType === 'none') {
+      return this.reminderMoveToTopOnTrigger ? { type: 'none', moveToTopOnTrigger: true } : null
+    }
+    const intervalDays = Math.max(1, Math.floor(Number(this.reminderRepeatCustomDays) || 1))
+    return {
+      type: this.reminderRepeatType,
+      ...(this.reminderRepeatType === 'custom_days' ? { intervalDays } : {}),
+      moveToTopOnTrigger: this.reminderMoveToTopOnTrigger
+    }
+  }
+
+  private resetReminderRepeatState() {
+    this.reminderRepeatType = 'none'
+    this.reminderRepeatCustomDays = 2
+    this.reminderMoveToTopOnTrigger = false
+  }
+
   private startOfMonth(date: Date) {
     return new Date(date.getFullYear(), date.getMonth(), 1)
   }
@@ -1783,6 +1934,7 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
   closeReminderPicker() {
     this.activePickerNoteId = null
     this.pendingPickerNote = null
+    this.resetReminderRepeatState()
     this.destroyTimePicker()
     document.removeEventListener('mousedown', this.pickerOutsideHandler)
   }
@@ -1845,27 +1997,27 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
     this.promptForNotificationPermission()
     const existing = note.id ? this.getActiveReminderForNote(note.id) : undefined
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
+    const repeatRule = this.selectedReminderRepeatRule()
+    this.closeReminderPicker()
     if (existing) {
-      await this.reminderService.update(existing.id, { dueAtUtc: date.toISOString(), status: 'pending' })
+      await this.reminderService.update(existing.id, { dueAtUtc: date.toISOString(), status: 'pending', repeatRule })
     } else {
       await this.reminderService.create({
         noteId: note.id,
         dueAtUtc: date.toISOString(),
         timezone: tz,
+        repeatRule,
         title: this.notePlainText(note.noteTitle) || undefined,
         body: this.notePlainText(note.noteBody) || undefined,
         imageUrl: this.firstNoteImageUrl(note) || undefined
       })
     }
-    this.closeReminderPicker()
   }
 
   confirmCustom(note: NoteI, dateInp: HTMLInputElement | null, timeInp: HTMLInputElement) {
     const d = dateInp?.value || this.customDate
     const t = this.toTwentyFourHourTime(timeInp.value || this.customTime)
     if (!d || !t) return
-    // Close synchronously so the picker always disappears regardless of API outcome
-    this.closeReminderPicker()
     this.customPickerOpen = false
     this.setReminder(new Date(`${d}T${t}`), note)
   }
@@ -2167,7 +2319,8 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
           this.Shared.clearNoteSelection()
         }
         else if (url instanceof ActivationEnd && url.snapshot.params['name']) {
-          this.currentPage.label = url.snapshot.params['name']
+          if (url.snapshot.routeConfig?.path === 'binder/:name') this.currentPage.binder = url.snapshot.params['name']
+          else this.currentPage.label = url.snapshot.params['name']
           this.updateCurrentPageName()
         }
       })

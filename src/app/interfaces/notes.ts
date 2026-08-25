@@ -27,6 +27,10 @@ export interface NoteI {
     attachments?: NoteAttachmentI[]
     isCbox: boolean
     labels: LabelI[]
+    binder?: string
+    locked?: boolean
+    lockSalt?: string
+    lockHash?: string
     archived: boolean
     trashed: boolean
     trashedAt?: string

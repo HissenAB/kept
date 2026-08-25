@@ -251,6 +251,23 @@
     white-space: nowrap;
   }
 
+  .locked-note-preview {
+    align-items: center;
+    display: inline-flex;
+    gap: 8px;
+    margin: 10px 16px 18px;
+    min-height: 32px;
+    opacity: 0.72;
+    font-family: Roboto, Arial, sans-serif;
+    font-size: 0.95rem;
+    font-weight: 600;
+
+    .material-symbols-outlined {
+      font-size: 20px;
+      line-height: 1;
+    }
+  }
+
   .link-only-wrap {
     overflow: hidden;
     position: relative;
@@ -319,6 +336,44 @@
 
   .body-segments .body:empty {
     display: none;
+  }
+
+  .cboxes.min {
+    margin: 8px 12px 12px 18px;
+  }
+
+  .overview-cbox-row {
+    align-items: flex-start;
+    min-height: 0;
+    padding: 5px 0;
+
+    .cbox-icon {
+      margin-top: 2px;
+    }
+  }
+
+  .overview-cbox-note-container {
+    width: auto;
+  }
+
+  .overview-cbox-note {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    font-size: 0.95rem;
+    line-height: 1.35rem;
+    overflow: hidden;
+    padding-left: 10px;
+  }
+
+  .overview-cbox-more {
+    color: inherit;
+    font-family: Roboto, Arial, sans-serif;
+    font-size: 0.9rem;
+    font-weight: 700;
+    line-height: 1.25rem;
+    margin: 6px 0 4px 34px;
+    opacity: 0.62;
   }
 
   .attachments-list {

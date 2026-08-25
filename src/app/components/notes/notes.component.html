@@ -1,16 +1,16 @@
-@let pageNotes = Shared.note.all | notesTools:currentPageName:Shared.searchQuery;
+@let pageNotes = Shared.note.all | notesTools:currentPageName:Shared.searchQuery:Shared.searchScope.value;
 <section>
   <input #overviewImageInput class="overview-image-input" type="file" accept="image/*" multiple
     (change)="overviewImageInputChange($event)">
   <section #mainContainer class="main-container" [class.is-dragging]="!!draggedNoteId"
     [class.native-phone-layout]="nativePhoneLayout"
     [class.grid-view]="Shared.noteViewType.value === 'grid'">
-    <div class="pb-80" [hidden]="!(Shared.note.pinned | notesTools:currentPageName:Shared.searchQuery).length">
+    <div class="pb-80" [hidden]="!(Shared.note.pinned | notesTools:currentPageName:Shared.searchQuery:Shared.searchScope.value).length">
       <p #title _title>pinned</p>
       <ng-container [ngTemplateOutlet]="noteTemplate" [ngTemplateOutletContext]="{notes:Shared.note.pinned}">
       </ng-container>
     </div>
-    <div [hidden]="!(Shared.note.unpinned | notesTools:currentPageName:Shared.searchQuery).length">
+    <div [hidden]="!(Shared.note.unpinned | notesTools:currentPageName:Shared.searchQuery:Shared.searchScope.value).length">
       <p #title _title>other</p>
       <ng-container [ngTemplateOutlet]="noteTemplate" [ngTemplateOutletContext]="{notes:Shared.note.unpinned}">
       </ng-container>
@@ -75,6 +75,34 @@
         }
       </div>
     </div>
+    <div class="rd-repeat" aria-label="Repeat reminder">
+      <div class="rd-repeat-title">Repeat</div>
+      <div class="rd-repeat-options">
+        @for (option of reminderRepeatOptions; track option.value) {
+          <button type="button"
+            [class.active]="reminderRepeatType === option.value"
+            (click)="setReminderRepeatType(option.value)">
+            {{ option.label }}
+          </button>
+        }
+      </div>
+      @if (reminderRepeatType === 'custom_days') {
+        <label class="rd-repeat-custom">
+          <span>Every</span>
+          <input type="number" min="1" max="365" inputmode="numeric" [(ngModel)]="reminderRepeatCustomDays">
+          <span>days</span>
+        </label>
+      }
+      <label class="rd-repeat-float">
+        <span class="material-symbols-outlined rd-float-icon">vertical_align_top</span>
+        <span class="rd-float-copy">
+          <strong>Float to top when it fires</strong>
+          <span>Jumps this note above the rest</span>
+        </span>
+        <input type="checkbox" [(ngModel)]="reminderMoveToTopOnTrigger">
+        <span class="rd-switch" aria-hidden="true"></span>
+      </label>
+    </div>
     <div class="rd-actions">
       <button type="button" class="rd-secondary" (click)="cancelPendingNoteDate()">Cancel</button>
       <button type="button" class="rd-primary" [disabled]="!customDate" (click)="confirmNoteDate(activePickerNote)">Pick time</button>
@@ -94,7 +122,7 @@
 <!--*  note template -->
 <ng-template #noteTemplate let-notes="notes">
   <div #noteEl [class.mx-auto]="Shared.noteViewType.value === 'list' ">
-    @let filteredNotes = notes | notesTools:currentPageName:Shared.searchQuery;
+    @let filteredNotes = notes | notesTools:currentPageName:Shared.searchQuery:Shared.searchScope.value;
     @for (note of visibleNotes(filteredNotes); track note.id) {
       <div #noteEL class="note-container" [class.selected]="Shared.isNoteSelected(note.id)"
         [class.note-dragging]="draggedNoteId === note.id"
@@ -130,7 +158,15 @@
             </div>
           }
           <div (click)="openModal(noteEL,note)">
-            @if (noteIsLinkOnly) {
+            @if (noteLock.lockPreviewHidden(note)) {
+              <div class="title">
+                <span [innerHTML]="note.noteTitle"></span>
+              </div>
+              <div class="locked-note-preview">
+                <span class="material-symbols-outlined">lock</span>
+                <span>Locked note</span>
+              </div>
+            } @else if (noteIsLinkOnly) {
                 @let extraLinks = hiddenLinkCount(note);
                 <div class="link-preview-stack link-preview-stack--only">
                   @for (url of visibleLinkUrls(note); track url) {
@@ -172,14 +208,15 @@
               <div class="cboxes min">
                 @let activeCboxes = note.checkBoxes! | cboxDone:false;
                 @let completedCboxes = note.checkBoxes! | cboxDone:true;
-                @for (cb of activeCboxes | slice:0:7; track cb.id; let i = $index) {
-                  <div class="cbox-container">
+                @let cboxPreview = overviewChecklistPreview(activeCboxes);
+                @for (cb of cboxPreview.items; track cb.id) {
+                  <div class="cbox-container overview-cbox-row">
                     <div (touchstart)="$event.stopPropagation()" (touchend)="toggleOverviewCheckbox(note, cb, $event)"
                     (mousedown)="$event.stopPropagation()" (mouseup)="toggleOverviewCheckbox(note, cb, $event)" (click)="$event.stopPropagation()" [class.done]="cb.done"
                     class="cbox-icon"></div>
-                    <div class="cbox-note-container min">
+                    <div class="cbox-note-container min overview-cbox-note-container">
                       <div [attr.data-id]="cb.id" [class.cbox-done]="cb.done"
-                        [class.min]="cb.data.length > 68" class="cbox-note"
+                        class="cbox-note overview-cbox-note"
                         [innerHTML]="cb.data">
                       </div>
                     </div>
@@ -188,38 +225,16 @@
                       class="cbox-cancel-icon min H">
                     </div>
                   </div>
-                  @if (i === 6) {
-                    <div class="cbox-container">
-                      <div class="cbox-icon"></div>
-                      <div class="cbox-note-container min">
-                        <div class="cbox-note">...</div>
-                      </div>
-                    </div>
-                  }
+                }
+                @if (cboxPreview.more) {
+                  <div class="overview-cbox-more">+{{cboxPreview.more}} more</div>
                 }
                 @if (completedCboxes.length) {
                   <div class="hr min"></div>
                   <div class="cbox-done-container min">
-                    <div class="cbox-arrow rotate"></div>
-                    <span>{{completedCboxes.length}} Completed item{{completedCboxes.length === 1 ? '' : 's'}}</span>
+                    <div class="cbox-arrow"></div>
+                    <span>({{completedCboxes.length}}) Completed items</span>
                   </div>
-                  @for (cb of completedCboxes | slice:0:7; track cb.id) {
-                    <div class="cbox-container">
-                      <div (touchstart)="$event.stopPropagation()" (touchend)="toggleOverviewCheckbox(note, cb, $event)"
-                      (mousedown)="$event.stopPropagation()" (mouseup)="toggleOverviewCheckbox(note, cb, $event)" (click)="$event.stopPropagation()" [class.done]="cb.done"
-                      class="cbox-icon"></div>
-                      <div class="cbox-note-container min">
-                        <div [attr.data-id]="cb.id" [class.cbox-done]="cb.done"
-                          [class.min]="cb.data.length > 68" class="cbox-note"
-                          [innerHTML]="cb.data">
-                        </div>
-                      </div>
-                      <div (touchstart)="$event.stopPropagation()" (touchend)="removeOverviewCheckbox(note, cb, $event)"
-                      (mousedown)="$event.stopPropagation()" (mouseup)="removeOverviewCheckbox(note, cb, $event)" (click)="$event.stopPropagation()"
-                      class="cbox-cancel-icon min H">
-                      </div>
-                    </div>
-                  }
                 }
               </div>
             }
@@ -245,7 +260,7 @@
             }
           }
         </div>
-        @if ((note.attachments || []).length) {
+        @if ((note.attachments || []).length && !noteLock.lockPreviewHidden(note)) {
           <div class="attachments-list min">
             @for (attachment of note.attachments || []; track attachment.id) {
               <div class="attachment-card min" role="button" tabindex="0"
@@ -360,7 +375,18 @@
   <div (click)="moreMenu(moreMenuTt).trash(activeNote!)">{{ (activeNote && activeNote.ownerUserId !== auth.currentUser?.id) ? 'Unshare this with me' : 'Delete note' }}</div>
   <div #labelMenuBtn (click)="moreMenu(moreMenuTt).openLabelMenu(labelMenuTt)">Add label
   </div>
+  <div (click)="moreMenu(moreMenuTt).openBinderMenu(binderMenuTt,labelMenuTt)">Move to binder</div>
   <div (click)="moreMenu(moreMenuTt).clone()">Make a copy</div>
+  @if (canManageActiveNoteLock() && !activeNote?.locked) {
+    <div (click)="moreMenu(moreMenuTt).lock()">Lock note</div>
+  }
+  @if (canManageActiveNoteLock() && activeNote?.locked) {
+    @if (noteLock.isUnlocked(activeNote)) {
+      <div (click)="moreMenu(moreMenuTt).relock()">Relock note</div>
+    }
+    <div (click)="moreMenu(moreMenuTt).changeLock()">Change passcode</div>
+    <div (click)="moreMenu(moreMenuTt).removeLock()">Remove lock</div>
+  }
 </div>
 <!--? color MENU -->
 <div #colorMenuTt data-tooltip="true" data-is-tooltip-open="false" class="colorMenu">
@@ -386,10 +412,10 @@
 <div #labelMenuTt data-tooltip="true" data-is-tooltip-open="false" class="labelMenu">
   <div class="title">Label note</div>
   <div class="search">
+    <div class="search-icon"></div>
     <input #newLabelInput type="text" maxlength="50" placeholder="Enter label name"
       (keydown.enter)="addLabelFromMenu(newLabelInput); $event.preventDefault()" (blur)="addLabelFromMenu(newLabelInput)"
       (input)="labelMenuError=''">
-    <div class="search-icon"></div>
   </div>
   @if (newLabelInput.value.trim().length) {
     <div class="label-list create-label" (mousedown)="$event.preventDefault()" (click)="addLabelFromMenu(newLabelInput)">
@@ -405,6 +431,36 @@
       <div class="label-list" (click)="labelMenu(label)">
         <div [class.done]='label.added' class="check-icon"></div>
         <div class="label-name">{{label.name}}</div>
+      </div>
+    }
+  </div>
+</div>
+<!--? binder MENU -->
+<div #binderMenuTt data-tooltip="true" data-is-tooltip-open="false" class="labelMenu binderMenu">
+  <div class="title">Move to binder</div>
+  <div class="search">
+    <input #newBinderInput type="text" maxlength="50" placeholder="Enter binder name"
+      (keydown.enter)="addBinderFromMenu(newBinderInput); $event.preventDefault()" (blur)="addBinderFromMenu(newBinderInput)"
+      (input)="binderMenuError=''">
+  </div>
+  @if (newBinderInput.value.trim().length) {
+    <div class="label-list create-label" (mousedown)="$event.preventDefault()" (click)="addBinderFromMenu(newBinderInput)">
+      <div class="check-icon"></div>
+      <div class="label-name">Create "{{newBinderInput.value.trim()}}"</div>
+    </div>
+  }
+  @if (binderMenuError) {
+    <div class="label-error">{{binderMenuError}}</div>
+  }
+  <div class="label-list-container">
+    <div class="label-list" (click)="setBinderFromMenu('', binderMenuTt)">
+      <div [class.done]='!binderName' class="check-icon"></div>
+      <div class="label-name">No binder</div>
+    </div>
+    @for (binder of Shared.binder.list; track binder.name) {
+      <div class="label-list" (click)="setBinderFromMenu(binder.name, binderMenuTt)">
+        <div [class.done]='binderName === binder.name' class="check-icon"></div>
+        <div class="label-name">{{binder.name}}</div>
       </div>
     }
   </div>
