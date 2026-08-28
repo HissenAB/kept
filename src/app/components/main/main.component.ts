@@ -12,6 +12,8 @@ import { LocationSavedPlacesService, type LocationSavedPlace } from 'src/app/ser
 import { androidSmartCaptureUiAllowed, isNativePhonePlatform } from 'src/app/utils/platform';
 import { OfflineSyncService } from 'src/app/services/offline-sync.service';
 import { OfflineSmartCaptureService } from 'src/app/services/offline-smart-capture.service';
+import { UserPreferencesService } from 'src/app/services/user-preferences.service';
+import { ensureTimepickerWheelPlugin } from 'src/app/utils/timepicker-wheel';
 
 interface SmartCaptureEstimateAction {
   type: string;
@@ -166,7 +168,8 @@ export class MainComponent implements OnInit, OnDestroy {
     private savedPlaces: LocationSavedPlacesService,
     private offlineSmartCapture: OfflineSmartCaptureService,
     private ngZone: NgZone,
-    public offlineSync: OfflineSyncService
+    public offlineSync: OfflineSyncService,
+    private preferences: UserPreferencesService
   ) { }
 
   openMobileComposer() {
@@ -956,13 +959,20 @@ export class MainComponent implements OnInit, OnDestroy {
   }
 
   private createSmartReminderTimePicker(timeInput: HTMLInputElement) {
+    if (this.preferences.value.useTwentyFourHourTime) ensureTimepickerWheelPlugin();
     if (this.smartReminderTimePicker && this.smartReminderTimePickerInput === timeInput) return;
     this.destroySmartReminderTimePicker();
     this.smartReminderTimePickerInput = timeInput;
     timeInput.value = this.smartReminderTime || this.currentTimeValue();
     this.smartReminderTimePicker = new TimepickerUI(timeInput, {
-      clock: { currentTime: { time: new Date(), updateInput: true } },
-      ui: { editable: true },
+      clock: {
+        type: this.preferences.value.useTwentyFourHourTime ? '24h' : '12h',
+        currentTime: { time: new Date(), updateInput: true }
+      },
+      ui: {
+        mode: this.preferences.value.useTwentyFourHourTime ? 'compact-wheel' : 'clock',
+        editable: true
+      },
       callbacks: {
         onConfirm: (data: ConfirmEventData) => {
           this.ngZone.run(() => {
@@ -998,6 +1008,9 @@ export class MainComponent implements OnInit, OnDestroy {
   }
 
   private formatTimeInput(date: Date) {
+    if (this.preferences.value.useTwentyFourHourTime) {
+      return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+    }
     let hour = date.getHours();
     const minutes = String(date.getMinutes()).padStart(2, '0');
     const period = hour >= 12 ? 'PM' : 'AM';
@@ -1327,7 +1340,16 @@ export class MainComponent implements OnInit, OnDestroy {
   }
 
   private smartReminderSummary(action: any) {
-    if (action?.dueAtUtc) return new Date(action.dueAtUtc).toLocaleString();
+    if (action?.dueAtUtc) {
+      return new Date(action.dueAtUtc).toLocaleString(undefined, {
+        month: 'numeric',
+        day: 'numeric',
+        year: 'numeric',
+        hour: this.preferences.value.useTwentyFourHourTime ? '2-digit' : 'numeric',
+        minute: '2-digit',
+        hour12: this.preferences.value.useTwentyFourHourTime ? false : undefined
+      });
+    }
     if (this.isLocationReminder(action)) {
       const trigger = action.locationTrigger === 'leave' ? 'leave' : 'arrive';
       return `When I ${trigger}: ${action.locationName}`;

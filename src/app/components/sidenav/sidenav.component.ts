@@ -67,13 +67,23 @@ export class NavComponent implements OnInit, AfterViewInit, OnDestroy {
   editLabel(id: number) {
     this.Shared.label.id = id
     let actions: LabelActionsT = {
-      delete: () => {
-        this.Shared.label.db.delete()
-        this.Shared.label.db.updateAllLabels('')
+      delete: async () => {
+        try {
+          await this.Shared.label.db.delete()
+          await this.Shared.label.db.updateAllLabels('')
+          this.labelError.nativeElement.hidden = true
+        } catch {
+          this.labelError.nativeElement.hidden = false
+        }
       },
-      update: (value: string) => {
-        this.Shared.label.db.update({ name: value })
-        this.Shared.label.db.updateAllLabels(value)
+      update: async (value: string) => {
+        try {
+          await this.Shared.label.db.update({ name: value })
+          await this.Shared.label.db.updateAllLabels(value)
+          this.labelError.nativeElement.hidden = true
+        } catch {
+          this.labelError.nativeElement.hidden = false
+        }
       }
     }
     return actions

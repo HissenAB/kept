@@ -34,6 +34,7 @@ import { ShareUserI } from '../interfaces/users';
 import { ReminderService } from './reminder.service';
 import { OfflineStoreService } from './offline-store.service';
 import { OfflineSyncService } from './offline-sync.service';
+import { UserPreferencesService } from './user-preferences.service';
 
 @Injectable({
   providedIn: 'root'
@@ -70,7 +71,8 @@ export class NotesService {
     private auth: AuthService,
     private reminders: ReminderService,
     private offlineStore: OfflineStoreService,
-    private offlineSync: OfflineSyncService
+    private offlineSync: OfflineSyncService,
+    private preferences: UserPreferencesService
   ) {
     this.offlineSync.cacheChanged$.subscribe(() => {
       this.publishCachedNotes(this.searchQuery).catch(console.error);
@@ -798,6 +800,9 @@ export class NotesService {
   private linkPreviewResolved = new Map<string, LinkPreviewData>();
 
   getLinkPreview(url: string): Promise<LinkPreviewData> {
+    if (!this.preferences.value.richLinkPreviews) {
+      return Promise.reject(new Error('Rich link previews are disabled.'));
+    }
     if (!this.linkPreviewCache.has(url)) {
       const promise = firstValueFrom(
         this.http.get<LinkPreviewData>(`${environment.apiUrl}/link-preview`, {
@@ -818,6 +823,7 @@ export class NotesService {
   }
 
   private queueLinkPreviewPreload(notes: NoteI[]) {
+    if (!this.preferences.value.richLinkPreviews) return;
     // Notes arrive sorted by recency / pinned-first, so URLs from the first
     // ~80 notes are the ones the user is about to see. Queue those first
     // so IntersectionObserver-based fetches in the rendered LinkPreview

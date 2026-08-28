@@ -52,6 +52,7 @@ export class LabelsService {
       await this.load();
     } catch (error) {
       console.log(error)
+      throw error
     }
   }
 
@@ -62,6 +63,7 @@ export class LabelsService {
         await this.load();
       } catch (error) {
         console.log(error)
+        throw error
       }
     }
   }

@@ -28,7 +28,7 @@
     <div class="no-notes">
       <div class="image"></div>
       <div>
-        <span class="text">Notes {{ currentPage.attachments ? 'with attachments' : ('you ' + (currentPage.reminders?'with reminders ' : (currentPage.archive? 'archive' : ( currentPage.trash?'trash':'add'))))}}
+        <span class="text">Notes {{ currentPage.attachments ? 'with attachments' : (currentPage.reminders ? 'you created with reminders' : ('you ' + (currentPage.archive? 'archive' : ( currentPage.trash?'trash':'add'))))}}
         appear here</span>
       </div>
     </div>
@@ -206,13 +206,13 @@
             }
             @if (note.isCbox) {
               <div class="cboxes min">
-                @let activeCboxes = note.checkBoxes! | cboxDone:false;
-                @let completedCboxes = note.checkBoxes! | cboxDone:true;
-                @let cboxPreview = overviewChecklistPreview(activeCboxes);
+                @let completedCboxesCount = overviewCompletedChecklistCount(note);
+                @let cboxPreview = overviewChecklistPreview(overviewChecklistItems(note));
                 @for (cb of cboxPreview.items; track cb.id) {
                   <div class="cbox-container overview-cbox-row">
                     <div (touchstart)="$event.stopPropagation()" (touchend)="toggleOverviewCheckbox(note, cb, $event)"
                     (mousedown)="$event.stopPropagation()" (mouseup)="toggleOverviewCheckbox(note, cb, $event)" (click)="$event.stopPropagation()" [class.done]="cb.done"
+                    [style.margin-left.px]="checkboxIndentPx(cb)"
                     class="cbox-icon"></div>
                     <div class="cbox-note-container min overview-cbox-note-container">
                       <div [attr.data-id]="cb.id" [class.cbox-done]="cb.done"
@@ -229,11 +229,11 @@
                 @if (cboxPreview.more) {
                   <div class="overview-cbox-more">+{{cboxPreview.more}} more</div>
                 }
-                @if (completedCboxes.length) {
+                @if (preferences.value.moveCompletedChecklistItemsToBottom && completedCboxesCount) {
                   <div class="hr min"></div>
                   <div class="cbox-done-container min">
                     <div class="cbox-arrow"></div>
-                    <span>({{completedCboxes.length}}) Completed items</span>
+                    <span>({{completedCboxesCount}}) Completed items</span>
                   </div>
                 }
               </div>

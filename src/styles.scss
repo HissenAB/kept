@@ -769,6 +769,26 @@ app-navbar .user-pic-container:hover::after {
   opacity: 0.25 !important;
 }
 
+body:not(.light-theme) .icons-container .icons>div:not(.disabled)::after,
+body:not(.light-theme) .icons-container .icons>button.undo:not(:disabled)::after {
+  background-color: #bdc1c6;
+}
+
+body:not(.light-theme) .icons-container .icons>div:not(.disabled),
+body:not(.light-theme) .icons-container .icons>button.undo:not(:disabled) {
+  opacity: 0.88 !important;
+}
+
+body:not(.light-theme) .icons-container .icons>.disabled,
+body:not(.light-theme) app-input .text-format-trigger:disabled {
+  opacity: 0.28 !important;
+}
+
+body:not(.light-theme) app-input .text-format-trigger:not(:disabled) {
+  color: #bdc1c6;
+  opacity: 0.88;
+}
+
 .icons-container .alarm::after {
   -webkit-mask: url(/assets/images/svg/alarm.svg) center / contain no-repeat;
   mask: url(/assets/images/svg/alarm.svg) center / contain no-repeat;

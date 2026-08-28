@@ -507,6 +507,7 @@ async function init() {
     await run('UPDATE notes SET ownerUserId = ? WHERE ownerUserId IS NULL', [firstUser.id]);
     await run('UPDATE labels SET userId = ? WHERE userId IS NULL', [firstUser.id]);
   }
+  await run('UPDATE notes SET lastEditorUserId = ownerUserId WHERE lastEditorUserId IS NULL AND ownerUserId IS NOT NULL');
   await run('CREATE UNIQUE INDEX IF NOT EXISTS labels_user_name_unique ON labels(userId, name)');
   await run(`
     CREATE TABLE IF NOT EXISTS note_images (
@@ -707,6 +708,7 @@ async function init() {
     )
   `);
   await run(`CREATE INDEX IF NOT EXISTS sync_changes_user_sequence_idx ON sync_changes(userId, sequence)`);
+  await backfillImportedNoteLabels();
   await run(`
     CREATE TABLE IF NOT EXISTS note_collaborator_rejoin_grants (
       noteId INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
@@ -1646,6 +1648,67 @@ async function findOrCreateLabelForUser(userId, rawName) {
   return { id: result.id, name, created: true };
 }
 
+async function normalizeLabelsForUser(userId, rawLabels) {
+  const normalized = [];
+  const seen = new Set();
+  let changed = false;
+
+  for (const rawLabel of rawLabels || []) {
+    const rawName = String(rawLabel?.name || '').trim();
+    if (!rawName) {
+      changed = true;
+      continue;
+    }
+
+    const key = rawName.toLowerCase();
+    if (seen.has(key)) {
+      changed = true;
+      continue;
+    }
+    seen.add(key);
+
+    const label = await findOrCreateLabelForUser(userId, rawName);
+    const added = rawLabel?.added !== false;
+    const nextLabel = { id: label.id, name: label.name, added };
+    normalized.push(nextLabel);
+
+    if (rawLabel?.id !== nextLabel.id || rawLabel?.name !== nextLabel.name || rawLabel?.added !== nextLabel.added) {
+      changed = true;
+    }
+  }
+
+  return { labels: normalized, changed };
+}
+
+async function backfillImportedNoteLabels() {
+  const rows = await all(
+    `SELECT id, ownerUserId, labels
+     FROM notes
+     WHERE ownerUserId IS NOT NULL
+       AND labels IS NOT NULL
+       AND labels <> ''
+       AND labels <> '[]'`
+  );
+
+  for (const row of rows) {
+    const rawLabels = parseJson(row.labels || '[]', []);
+    if (!Array.isArray(rawLabels) || !rawLabels.length) continue;
+
+    const { labels, changed } = await normalizeLabelsForUser(row.ownerUserId, rawLabels);
+    if (!changed) continue;
+
+    const lww = serverLwwStamp();
+    await run(
+      `UPDATE notes
+       SET labels = ?, lastEditorUserId = COALESCE(lastEditorUserId, ownerUserId),
+           lwwPhysicalMs = ?, lwwLogical = ?, lwwDeviceId = ?, lwwOperationId = ?
+       WHERE id = ?`,
+      [JSON.stringify(labels), lww.physicalMs, lww.logical, lww.deviceId, lww.operationId, row.id]
+    );
+    await recordNoteSyncChange(row.id, 'upsert', [row.ownerUserId]);
+  }
+}
+
 async function findLabelForUser(userId, rawName) {
   const name = String(rawName || '').trim();
   if (!name) return null;
@@ -2056,7 +2119,8 @@ function decodeNotesCursor(cursor) {
   }
 }
 
-async function cleanupUnusedLabels(userId) {
+async function cleanupUnusedLabels(userId, candidateIds = []) {
+  if (!Array.isArray(candidateIds) || !candidateIds.length) return;
   try {
     const notes = await all('SELECT labels FROM notes WHERE ownerUserId = ?', [userId]);
     const usedLabelNames = new Set();
@@ -2067,7 +2131,11 @@ async function cleanupUnusedLabels(userId) {
       });
     });
 
-    const allLabels = await all('SELECT id, name FROM labels WHERE userId = ?', [userId]);
+    const allLabels = await all(
+      `SELECT id, name FROM labels
+       WHERE userId = ? AND id IN (${candidateIds.map(() => '?').join(',')})`,
+      [userId, ...candidateIds]
+    );
     for (const label of allLabels) {
       if (!usedLabelNames.has(label.name)) {
         await run('DELETE FROM labels WHERE id = ?', [label.id]);
@@ -2076,6 +2144,47 @@ async function cleanupUnusedLabels(userId) {
   } catch (error) {
     console.error('Failed to cleanup labels:', error);
   }
+}
+
+async function updateNoteLabelReferencesForUser(userId, labelId, labelValue, options = {}) {
+  const oldName = String(options.oldName || '').trim().toLowerCase();
+  const rows = await all('SELECT id, labels FROM notes WHERE ownerUserId = ?', [userId]);
+  const recipientIds = new Set([userId]);
+  const changedNoteIds = [];
+  const now = new Date().toISOString();
+
+  for (const row of rows) {
+    let changed = false;
+    let labels = parseJson(row.labels, []);
+    if (!Array.isArray(labels)) labels = [];
+
+    if (labelValue === '') {
+      const nextLabels = labels.filter(label => {
+        const sameId = Number(label?.id) === Number(labelId);
+        const sameOldName = oldName && String(label?.name || '').trim().toLowerCase() === oldName;
+        return !(sameId || sameOldName);
+      });
+      changed = nextLabels.length !== labels.length;
+      labels = nextLabels;
+    } else {
+      labels = labels.map(label => {
+        const sameId = Number(label?.id) === Number(labelId);
+        const sameOldName = oldName && String(label?.name || '').trim().toLowerCase() === oldName;
+        if (!sameId && !sameOldName) return label;
+        changed = true;
+        return { ...label, id: labelId, name: labelValue };
+      });
+    }
+
+    if (!changed) continue;
+    await run('UPDATE notes SET labels = ?, updatedAt = ? WHERE id = ?', [JSON.stringify(labels), now, row.id]);
+    changedNoteIds.push(row.id);
+    const noteRecipients = await getNoteRecipientIds(row.id);
+    noteRecipients.forEach(noteUserId => recipientIds.add(noteUserId));
+    await recordNoteSyncChange(row.id, 'upsert', [...noteRecipients]);
+  }
+
+  return { recipientIds, changedNoteIds };
 }
 
 function noteToParams(note) {
@@ -3638,17 +3747,26 @@ app.patch('/api/labels/:id', requireAuth, asyncRoute(async (req, res) => {
   const labelId = Number(req.params.id);
   const name = String(req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Label name is required.' });
-  const label = await get('SELECT id FROM labels WHERE id = ? AND userId = ?', [labelId, req.user.id]);
+  const label = await get('SELECT id, name FROM labels WHERE id = ? AND userId = ?', [labelId, req.user.id]);
   if (!label) return res.status(404).json({ error: 'Label not found.' });
+  const duplicate = await get(
+    'SELECT id FROM labels WHERE userId = ? AND lower(name) = lower(?) AND id <> ?',
+    [req.user.id, name, labelId]
+  );
+  if (duplicate) return res.status(409).json({ error: 'Label already exists.' });
   await run('UPDATE labels SET name = ? WHERE id = ? AND userId = ?', [name, labelId, req.user.id]);
+  const { recipientIds } = await updateNoteLabelReferencesForUser(req.user.id, labelId, name, { oldName: label.name });
+  broadcastRealtime([...recipientIds], { type: 'notes-changed', action: 'labels-updated' });
   res.json({ id: labelId, name });
 }));
 
 app.delete('/api/labels/:id', requireAuth, asyncRoute(async (req, res) => {
   const labelId = Number(req.params.id);
-  const label = await get('SELECT id FROM labels WHERE id = ? AND userId = ?', [labelId, req.user.id]);
+  const label = await get('SELECT id, name FROM labels WHERE id = ? AND userId = ?', [labelId, req.user.id]);
   if (!label) return res.status(404).json({ error: 'Label not found.' });
   await run('DELETE FROM labels WHERE id = ? AND userId = ?', [labelId, req.user.id]);
+  const { recipientIds } = await updateNoteLabelReferencesForUser(req.user.id, labelId, '', { oldName: label.name });
+  broadcastRealtime([...recipientIds], { type: 'notes-changed', action: 'labels-updated' });
   res.status(204).end();
 }));
 
@@ -4727,7 +4845,7 @@ app.post('/api/ai/action-plan/execute', requireAuth, asyncRoute(async (req, res)
   for (const noteId of state.createdNoteIds) await broadcastNoteChange(noteId, 'created', [req.user.id]);
   for (const noteId of state.updatedNoteIds) await broadcastNoteChange(noteId, 'updated');
   for (const share of state.shareBroadcasts) await broadcastNoteChange(share.noteId, 'collaborators-updated', share.previousRecipients);
-  if (state.createdLabelIds.size) await cleanupUnusedLabels(req.user.id);
+  if (state.createdLabelIds.size) await cleanupUnusedLabels(req.user.id, Array.from(state.createdLabelIds));
   await syncSmartReminderIntegrations(req.user.id, state.remindersToSync);
 
   res.status(failed.length ? 207 : 200).json(response);
@@ -5280,7 +5398,6 @@ app.patch('/api/notes/labels/:labelId', requireAuth, asyncRoute(async (req, res)
   }
 
   broadcastRealtime([...recipientIds], { type: 'notes-changed', action: 'labels-updated' });
-  await cleanupUnusedLabels(req.user.id);
   res.status(204).end();
 }));
 
@@ -6653,6 +6770,71 @@ function isKeepJsonEntry(entry) {
   return !entry.isDirectory && /(^|\/)(?:Takeout\/)?Keep\/[^/]+\.json$/i.test(entry.entryName);
 }
 
+function keepListText(item) {
+  return String(item?.text ?? item?.title ?? item?.data ?? item?.name ?? '');
+}
+
+function keepListIndentFromValue(value) {
+  if (value === true) return 1;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? 1 : 0;
+}
+
+function keepListIndentLevel(item, fallbackLevel = 0) {
+  const explicitKeys = [
+    'indentLevel',
+    'indentationLevel',
+    'indent',
+    'level',
+    'depth',
+    'nestingLevel',
+    'childLevel'
+  ];
+  for (const key of explicitKeys) {
+    if (item && item[key] !== undefined && item[key] !== null) {
+      return keepListIndentFromValue(item[key]);
+    }
+  }
+
+  const parentKeys = ['parentId', 'parentItemId', 'parentListItemId', 'superListItemId', 'parent'];
+  if (parentKeys.some(key => item && item[key] !== undefined && item[key] !== null && item[key] !== '')) return 1;
+
+  const text = keepListText(item);
+  if (/^(?:\t| {2,}|\u00a0{2,})/.test(text)) return 1;
+
+  return keepListIndentFromValue(fallbackLevel);
+}
+
+function keepListChildren(item) {
+  for (const key of ['children', 'childItems', 'subitems', 'subItems', 'items', 'listContent']) {
+    if (Array.isArray(item?.[key]) && item[key].length) return item[key];
+  }
+  return [];
+}
+
+function importedKeepChecklistItems(listContent, fallbackLevel = 0, state = { nextId: 0 }) {
+  const checkBoxes = [];
+  if (!Array.isArray(listContent)) return checkBoxes;
+
+  for (const item of listContent) {
+    const rawText = keepListText(item);
+    const indentLevel = keepListIndentLevel(item, fallbackLevel);
+    checkBoxes.push({
+      id: `imp-${Date.now()}-${state.nextId++}`,
+      data: escapeHtml(rawText.replace(/^(?:\t| {2,}|\u00a0{2,})/, '')),
+      done: !!(item?.isChecked ?? item?.checked ?? item?.done),
+      indentLevel
+    });
+
+    const children = keepListChildren(item);
+    if (children.length) {
+      checkBoxes.push(...importedKeepChecklistItems(children, 1, state));
+    }
+  }
+
+  return checkBoxes;
+}
+
 async function readZipEntries(buffer) {
   let admZipError;
   let rawEntries;
@@ -6781,11 +6963,7 @@ app.post('/api/import/google-takeout', requireAuth, uploadZip.single('takeout'),
         let isCbox = 0, checkBoxes = [];
         if (note.listContent?.length) {
           isCbox = 1;
-          checkBoxes = note.listContent.map((item, i) => ({
-            id: `imp-${Date.now()}-${i}`,
-            data: (item.text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
-            done: item.isChecked || false
-          }));
+          checkBoxes = importedKeepChecklistItems(note.listContent);
         }
 
         const images = [];
@@ -6807,7 +6985,17 @@ app.post('/api/import/google-takeout', requireAuth, uploadZip.single('takeout'),
           }
         }
 
-        const labels = (note.labels || []).map(l => ({ name: l.name, added: true }));
+        const labels = [];
+        const seenLabels = new Set();
+        for (const rawLabel of (note.labels || [])) {
+          const labelName = String(rawLabel?.name || '').trim();
+          if (!labelName) continue;
+          const labelKey = labelName.toLowerCase();
+          if (seenLabels.has(labelKey)) continue;
+          seenLabels.add(labelKey);
+          const label = await findOrCreateLabelForUser(req.user.id, labelName);
+          labels.push({ id: label.id, name: label.name, added: true });
+        }
         const createdAt = note.createdTimestampUsec ? new Date(note.createdTimestampUsec / 1000).toISOString() : now;
         const updatedAt = note.userEditedTimestampUsec ? new Date(note.userEditedTimestampUsec / 1000).toISOString() : now;
 
@@ -6829,12 +7017,14 @@ app.post('/api/import/google-takeout', requireAuth, uploadZip.single('takeout'),
         // Keep imported notes in their original Keep recency order instead of
         // treating the import itself as the note date.
         const importSortOrder = new Date(updatedAt || createdAt || now).getTime() || Date.now();
+        const lww = serverLwwStamp();
         const insertResult = await run(
-          `INSERT INTO notes (ownerUserId, noteTitle, noteBody, pinned, bgColor, bgImage, checkBoxes, images, isCbox, labels, binder, archived, trashed, sortOrder, createdAt, updatedAt)
-           VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, '', ?, 0, ?, ?, ?)`,
-          [req.user.id, noteTitle, noteBody, pinnedFlag, bgColor,
+          `INSERT INTO notes (ownerUserId, syncId, noteTitle, noteBody, pinned, bgColor, bgImage, checkBoxes, images, isCbox, labels, binder, archived, trashed, sortOrder, createdAt, updatedAt, lastEditorUserId, lwwPhysicalMs, lwwLogical, lwwDeviceId, lwwOperationId)
+           VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, '', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [req.user.id, `note-${crypto.randomUUID()}`, noteTitle, noteBody, pinnedFlag, bgColor,
            JSON.stringify(checkBoxes), JSON.stringify(images), isCbox, JSON.stringify(labels),
-           archivedFlag, importSortOrder, createdAt, updatedAt]
+           archivedFlag, importSortOrder, createdAt, updatedAt, req.user.id,
+           lww.physicalMs, lww.logical, lww.deviceId, lww.operationId]
         );
         // The /api/notes endpoint resolves `pinned` from the per-user
         // `user_pins` table, not the legacy `notes.pinned` column. Without
@@ -6844,6 +7034,7 @@ app.post('/api/import/google-takeout', requireAuth, uploadZip.single('takeout'),
           await run('INSERT OR IGNORE INTO user_pins (userId, noteId) VALUES (?, ?)', [req.user.id, insertResult.id]);
         }
         await syncNoteImagesForNote(insertResult.id, req.user.id, { noteBody, images });
+        await recordNoteSyncChange(insertResult.id, 'upsert', [req.user.id]);
         imported++;
       } catch (e) { console.error('Takeout import error:', entry.entryName, e.message); errors++; }
     }

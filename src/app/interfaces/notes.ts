@@ -73,6 +73,7 @@ export interface CheckboxI {
     done: boolean,
     data: any,
     id: number
+    indentLevel?: number
 }
 
 export type UpdateKeyI = {

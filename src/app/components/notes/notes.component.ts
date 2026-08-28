@@ -16,6 +16,8 @@ import { TimepickerUI, type ConfirmEventData } from 'timepicker-ui';
 import { NotesToolsPipe } from 'src/app/pipes/notes-tools.pipe';
 import { isNativePhonePlatform, shouldUseFullscreenNoteEditor } from 'src/app/utils/platform';
 import { NoteLockService } from 'src/app/services/note-lock.service';
+import { UserPreferencesService } from 'src/app/services/user-preferences.service';
+import { ensureTimepickerWheelPlugin } from 'src/app/utils/timepicker-wheel';
 
 declare var Snackbar: any;
 type NoteBodySegment = { type: 'html'; value: string } | { type: 'url'; value: string }
@@ -31,7 +33,7 @@ type NoteMeta = { rawBody: string; title: string; bgKey: string; urls: string[];
 export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
   activeNote: NoteI | null = null
   readonly nativePhoneLayout = isNativePhonePlatform()
-  constructor(public Shared: SharedService, private router: Router, public auth: AuthService, public reminderService: ReminderService, private zone: NgZone, public notesService: NotesService, private cd: ChangeDetectorRef, private notesTools: NotesToolsPipe, public noteLock: NoteLockService) { }
+  constructor(public Shared: SharedService, private router: Router, public auth: AuthService, public reminderService: ReminderService, private zone: NgZone, public notesService: NotesService, private cd: ChangeDetectorRef, private notesTools: NotesToolsPipe, public noteLock: NoteLockService, public preferences: UserPreferencesService) { }
 
   private subscriptions: Subscription[] = []
 
@@ -231,6 +233,38 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
     return 3
   }
 
+  overviewChecklistItems(note: NoteI) {
+    const checkBoxes = note.checkBoxes || []
+    return this.preferences.value.moveCompletedChecklistItemsToBottom
+      ? checkBoxes.filter(item => !item.done)
+      : checkBoxes
+  }
+
+  overviewCompletedChecklistCount(note: NoteI) {
+    return (note.checkBoxes || []).filter(item => item.done).length
+  }
+
+  checkboxIndentLevel(cb?: CheckboxI) {
+    return Number(cb?.indentLevel) === 1 ? 1 : 0
+  }
+
+  checkboxIndentPx(cb?: CheckboxI) {
+    return this.checkboxIndentLevel(cb) * 28
+  }
+
+  private toggleChecklistItemWithChildren(checkBoxes: CheckboxI[] = [], id: number) {
+    const index = checkBoxes.findIndex(item => item.id === id)
+    if (index < 0) return
+    const done = !checkBoxes[index].done
+    checkBoxes[index].done = done
+    if (this.checkboxIndentLevel(checkBoxes[index]) !== 0) return
+
+    for (let i = index + 1; i < checkBoxes.length; i++) {
+      if (this.checkboxIndentLevel(checkBoxes[i]) === 0) break
+      checkBoxes[i].done = done
+    }
+  }
+
   private htmlPlainText(value?: string | null) {
     const div = document.createElement('div')
     div.innerHTML = String(value || '')
@@ -241,12 +275,13 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
     const rawBody = note.noteBody || ''
     const title = note.noteTitle || ''
     const themeKey = document.body.classList.contains('light-theme') ? 'l' : 'd'
-    const bgKey = `${note.bgColor || ''}|${note.bgImage || ''}|${note.isCbox ? 1 : 0}|${themeKey}`
+    const richLinkPreviews = this.preferences.value.richLinkPreviews
+    const bgKey = `${note.bgColor || ''}|${note.bgImage || ''}|${note.isCbox ? 1 : 0}|${themeKey}|links:${richLinkPreviews ? 1 : 0}`
     const cached = this.noteMetaCache.get(note)
     if (cached && cached.rawBody === rawBody && cached.title === title && cached.bgKey === bgKey) return cached
 
     const body = this.auth.authenticatedImageHtml(rawBody)
-    const bodyPreview = this.buildBodySegments(body)
+    const bodyPreview = richLinkPreviews ? this.buildBodySegments(body) : { segments: [{ type: 'html' as const, value: body }], urls: [] }
     const bodySegments = bodyPreview.segments
     const urls = bodyPreview.urls
     const visibleUrls = urls.slice(0, 3)
@@ -257,9 +292,9 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
     const linkOnly = !note.isCbox && urls.length > 0 && !title.trim() && !bodyWithoutUrls
     const isLightMode = document.body.classList.contains('light-theme');
     const defaultTextColor = isLightMode ? '#202124' : '#e8eaed';
-    const textColor = note.bgImage || (note.bgColor && this.isLightColor(note.bgColor)) ? '#202124' : (note.bgColor ? '#e8eaed' : defaultTextColor);
+    const textColor = this.hasRealBgImage(note.bgImage) || (note.bgColor && this.isLightColor(note.bgColor)) ? '#202124' : (note.bgColor ? '#e8eaed' : defaultTextColor);
 
-    const displayBody = urls.length ? this.hideLinksInHtml(body) : body
+    const displayBody = richLinkPreviews && urls.length ? this.hideLinksInHtml(body) : body
     const next = { rawBody, title, bgKey, urls, linkOnly, textColor, displayBody, bodySegments, hiddenLinkCount, visibleUrls }
     this.noteMetaCache.set(note, next)
     return next
@@ -349,6 +384,16 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
     flushBuffer()
 
     return { segments, urls }
+  }
+
+  private normalizeBgImage(data?: string | null) {
+    const value = String(data || '').trim()
+    if (!value || value === 'url()' || value === 'url("")' || value === "url('')" || value === 'none') return ''
+    return value.startsWith('url(') ? value : `url(${value})`
+  }
+
+  private hasRealBgImage(data?: string | null) {
+    return !!this.normalizeBgImage(data)
   }
 
   private hideLinksInHtml(html: string) {
@@ -858,7 +903,7 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
     event?.stopPropagation()
     let actions = {
       check: (cb: CheckboxI) => {
-        cb.done = !cb.done
+        this.toggleChecklistItemWithChildren(note.checkBoxes || [], cb.id)
         this.scheduleBuildMasonry(true)
       },
       remove: (cb: CheckboxI) => {
@@ -876,8 +921,7 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
     event.preventDefault()
     if (this.ignoreSyntheticOverviewCheckboxMouse(event)) return
     if (note.isCardPreview && note.id) note = await this.notesService.get(note.id).catch(() => note)
-    const target = note.checkBoxes?.find(item => item.id === cb.id) || cb
-    target.done = !target.done
+    this.toggleChecklistItemWithChildren(note.checkBoxes || [], cb.id)
     await this.notesService.updateKey({ checkBoxes: note.checkBoxes }, note.id!)
     this.scheduleBuildMasonry(true)
   }
@@ -1515,7 +1559,7 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
       this.Shared.note.db.updateKey({ bgColor: data })
     },
     bgImage: (data: bgImages) => {
-      this.Shared.note.db.updateKey({ bgImage: `url(${data})` })
+      this.Shared.note.db.updateKey({ bgImage: this.normalizeBgImage(data) })
     }
   }
 
@@ -2023,6 +2067,7 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
   }
 
   private createTimePicker(note: NoteI | null, dateInput: HTMLInputElement | null, timeInput: HTMLInputElement) {
+    if (this.preferences.value.useTwentyFourHourTime) ensureTimepickerWheelPlugin()
     if (this.customTimePicker && this.customTimePickerInput === timeInput) {
       this.timePickerNote = note || this.timePickerNote
       this.timePickerDateInput = dateInput || this.timePickerDateInput
@@ -2035,9 +2080,11 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
     timeInput.value = this.customTime || this.currentTimeValue()
     this.customTimePicker = new TimepickerUI(timeInput, {
       clock: {
+        type: this.preferences.value.useTwentyFourHourTime ? '24h' : '12h',
         currentTime: { time: new Date(), updateInput: true }
       },
       ui: {
+        mode: this.preferences.value.useTwentyFourHourTime ? 'compact-wheel' : 'clock',
         editable: true
       },
       callbacks: {
@@ -2128,7 +2175,11 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
   }
 
   private currentTimeValue() {
-    return new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    return new Date().toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: this.preferences.value.useTwentyFourHourTime ? false : undefined
+    })
   }
 
   fireDebugReminder(note: NoteI, event: Event) {
@@ -2166,14 +2217,28 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
   }
 
   formatPickerDate(date: Date): string {
-    return date.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+    return date.toLocaleString(undefined, {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      hour: this.preferences.value.useTwentyFourHourTime ? '2-digit' : 'numeric',
+      minute: '2-digit',
+      hour12: this.preferences.value.useTwentyFourHourTime ? false : undefined
+    })
   }
 
   formatReminderDate(isoString: string): string {
-    const cached = this.reminderDateCache.get(isoString)
+    const cacheKey = `${isoString}|24:${this.preferences.value.useTwentyFourHourTime ? 1 : 0}`
+    const cached = this.reminderDateCache.get(cacheKey)
     if (cached) return cached
-    const formatted = new Date(isoString).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
-    this.reminderDateCache.set(isoString, formatted)
+    const formatted = new Date(isoString).toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: this.preferences.value.useTwentyFourHourTime ? '2-digit' : 'numeric',
+      minute: '2-digit',
+      hour12: this.preferences.value.useTwentyFourHourTime ? false : undefined
+    })
+    this.reminderDateCache.set(cacheKey, formatted)
     return formatted
   }
 
@@ -2312,6 +2377,12 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
         this.settleSmartCaptureResultsLayout(notes)
       }),
       this.reminderService.reminders$.subscribe(() => { this.masonrySignatureToken++ }),
+      this.preferences.preferences$.subscribe(() => {
+        this.noteMetaCache = new WeakMap<NoteI, NoteMeta>()
+        this.reminderDateCache.clear()
+        this.destroyTimePicker()
+        this.scheduleBuildMasonry(true)
+      }),
       this.router.events.subscribe(url => {
         if (url instanceof NavigationEnd) {
           const currentUrl = url.urlAfterRedirects || url.url

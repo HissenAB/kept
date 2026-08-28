@@ -9,6 +9,7 @@ declare var Snackbar: any;
 @Injectable({ providedIn: 'root' })
 export class PushNotificationService {
   private readonly apiUrl = environment.apiUrl;
+  private readonly permissionPromptDismissedKey = 'kept_notification_permission_prompt_dismissed';
   private isRegistering = false;
 
   constructor(private http: HttpClient, private auth: AuthService) {
@@ -35,6 +36,43 @@ export class PushNotificationService {
 
   iosNeedsHomeScreenInstall() {
     return this.isIos() && !this.isStandalone();
+  }
+
+  notificationsSupported() {
+    return this.isSupported();
+  }
+
+  notificationPermission(): NotificationPermission | 'unsupported' {
+    if (!this.isSupported()) return 'unsupported';
+    return Notification.permission;
+  }
+
+  notificationPermissionPromptDismissed() {
+    try {
+      return localStorage.getItem(this.permissionPromptDismissedKey) === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  dismissNotificationPermissionPrompt() {
+    try {
+      localStorage.setItem(this.permissionPromptDismissedKey, '1');
+    } catch {}
+  }
+
+  restoreNotificationPermissionPrompt() {
+    try {
+      localStorage.removeItem(this.permissionPromptDismissedKey);
+    } catch {}
+  }
+
+  shouldShowNotificationPermissionPrompt() {
+    if (!this.isSupported()) return false;
+    if (Notification.permission !== 'default') return false;
+    if (this.notificationPermissionPromptDismissed()) return false;
+    if (this.isIos() && !this.isStandalone()) return false;
+    return true;
   }
 
   /**

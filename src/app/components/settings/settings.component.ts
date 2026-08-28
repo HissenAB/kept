@@ -6,6 +6,8 @@ import { ReminderService } from 'src/app/services/reminder.service';
 import { NotesService, TakeoutImportResult } from 'src/app/services/notes.service';
 
 import { AuthService } from 'src/app/services/auth.service';
+import { PushNotificationService } from 'src/app/services/push-notification.service';
+import { UserPreferencesService } from 'src/app/services/user-preferences.service';
 import {
   androidSmartCaptureEnabled,
   androidMajorVersion,
@@ -103,6 +105,12 @@ export class SettingsComponent implements OnInit, OnDestroy {
   legacyAndroidSmartCaptureVisible = isLegacyAndroidSmartCaptureDevice();
   legacyAndroidSmartCaptureEnabled = legacyAndroidSmartCaptureEnabled();
   androidMajorVersion = androidMajorVersion();
+  notificationPermissionsVisible = false;
+  notificationPermission: NotificationPermission | 'unsupported' = 'unsupported';
+  notificationPromptDismissed = false;
+  useTwentyFourHourTime = false;
+  moveCompletedChecklistItemsToBottom = true;
+  richLinkPreviews = true;
   permissionsStatus: PermissionsStatus | null = null;
   isLoadingPermissions = false;
   isRequestingPermission: string | null = null;
@@ -122,7 +130,9 @@ export class SettingsComponent implements OnInit, OnDestroy {
     private notesService: NotesService,
     private route: ActivatedRoute,
     private router: Router,
-    public authService: AuthService
+    public authService: AuthService,
+    private push: PushNotificationService,
+    private preferences: UserPreferencesService
   ) {}
 
   async ngOnInit() {
@@ -136,6 +146,8 @@ export class SettingsComponent implements OnInit, OnDestroy {
       history.replaceState({}, '', '/settings');
     }
     await this.loadAll();
+    this.refreshNotificationPermissionState();
+    this.refreshDisplayPreferences();
 
     if (this.isIos) {
       await this.loadPermissionsStatus();
@@ -166,6 +178,41 @@ export class SettingsComponent implements OnInit, OnDestroy {
     this.androidSmartCaptureEnabled = enabled;
     setAndroidSmartCaptureEnabled(enabled);
     window.dispatchEvent(new CustomEvent('kept-smart-capture-changed', { detail: { enabled } }));
+  }
+
+  showNotificationPrompt() {
+    this.push.restoreNotificationPermissionPrompt();
+    this.refreshNotificationPermissionState();
+    window.dispatchEvent(new CustomEvent('kept-notification-permission-reprompt'));
+    this.success = 'Notification prompt restored.';
+  }
+
+  toggleTwentyFourHourTime(event: Event) {
+    this.useTwentyFourHourTime = (event.target as HTMLInputElement).checked;
+    this.preferences.update({ useTwentyFourHourTime: this.useTwentyFourHourTime });
+  }
+
+  toggleMoveCompletedChecklistItems(event: Event) {
+    this.moveCompletedChecklistItemsToBottom = (event.target as HTMLInputElement).checked;
+    this.preferences.update({ moveCompletedChecklistItemsToBottom: this.moveCompletedChecklistItemsToBottom });
+  }
+
+  toggleRichLinkPreviews(event: Event) {
+    this.richLinkPreviews = (event.target as HTMLInputElement).checked;
+    this.preferences.update({ richLinkPreviews: this.richLinkPreviews });
+  }
+
+  private refreshNotificationPermissionState() {
+    this.notificationPermissionsVisible = this.push.notificationsSupported();
+    this.notificationPermission = this.push.notificationPermission();
+    this.notificationPromptDismissed = this.push.notificationPermissionPromptDismissed();
+  }
+
+  private refreshDisplayPreferences() {
+    const value = this.preferences.value;
+    this.useTwentyFourHourTime = value.useTwentyFourHourTime;
+    this.moveCompletedChecklistItemsToBottom = value.moveCompletedChecklistItemsToBottom;
+    this.richLinkPreviews = value.richLinkPreviews;
   }
 
   private async loadAll() {

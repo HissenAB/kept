@@ -210,6 +210,7 @@
   flex: 0 0 24px;
   width: 24px;
   height: 24px;
+  transition: margin-left 0.12s ease, opacity 0.16s ease;
 
   &.done {
     -webkit-mask-image: url(/assets/images/svg/box-checked.svg);

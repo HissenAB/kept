@@ -752,16 +752,16 @@
     </div>
   </div>
   <!--? isDone: true -->
-  @if ((checkBoxes | cboxDone:true).length) {
+  @if (preferences.value.moveCompletedChecklistItemsToBottom && completedChecklistCount()) {
     <div class="hr"></div>
     <div class="cbox-done-container" (click)="isCboxCompletedListCollapsed = !isCboxCompletedListCollapsed">
       <div [class.rotate]="!isCboxCompletedListCollapsed" class="cbox-arrow"></div>
       <div>
-        <span>({{(checkBoxes | cboxDone:true).length}}) Completed items</span>
+        <span>({{completedChecklistCount()}}) Completed items</span>
       </div>
     </div>
   }
-  @if (!isCboxCompletedListCollapsed) {
+  @if (preferences.value.moveCompletedChecklistItemsToBottom && !isCboxCompletedListCollapsed) {
     <ng-container [ngTemplateOutlet]="cboxTemplate"
       [ngTemplateOutletContext]="{ isDone: true }">
     </ng-container>
@@ -769,7 +769,7 @@
 
   <!--* cbox template -->
   <ng-template let-isDone="isDone" #cboxTemplate>
-    @for (cb of checkBoxes | cboxDone:isDone; track cb.id; let last = $last) {
+    @for (cb of checklistRowsForSection(isDone); track cb.id; let last = $last) {
       <div class="cbox-container" [attr.data-cbox-row-id]="cb.id" [class.cbox-dragging]="draggedCboxId === cb.id"
         [draggable]="dragReadyCboxId === cb.id"
         (dragstart)="cboxDragStart(cb.id, $event)" (dragend)="cboxDragEnd()"
@@ -782,6 +782,7 @@
           (touchend)="cboxTouchEnd()"
           (touchcancel)="cboxTouchEnd()"></div>
         <div [class.done]="cb.done" class="cbox-icon"
+          [style.margin-left.px]="checkboxIndentPx(cb)"
           (touchend)="toggleCboxDone(cb.id, $event)"
           (click)="toggleCboxDone(cb.id, $event)"></div>
         <div class="cbox-note-container">

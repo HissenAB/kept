@@ -19,6 +19,8 @@ import { NgZone } from '@angular/core';
 import { TimepickerUI, type ConfirmEventData } from 'timepicker-ui';
 import { isNativePhonePlatform, shouldUseFullscreenNoteEditor } from 'src/app/utils/platform';
 import { NoteLockService } from 'src/app/services/note-lock.service';
+import { UserPreferencesService } from 'src/app/services/user-preferences.service';
+import { ensureTimepickerWheelPlugin } from 'src/app/utils/timepicker-wheel';
 
 declare var Snackbar: any;
 type InputLengthI = { title?: number, body?: number, cb?: number }
@@ -39,7 +41,7 @@ export class InputComponent implements OnInit {
   }
   @HostBinding('class.native-phone-layout') readonly nativePhoneLayout = isNativePhonePlatform();
 
-  constructor(private cd: ChangeDetectorRef, public Shared: SharedService, public auth: AuthService, private notesService: NotesService, private push: PushNotificationService, private reminderService: ReminderService, public keptPlugins: KeptPluginsService, private savedPlacesService: LocationSavedPlacesService, private zone: NgZone, private router: Router, public noteLock: NoteLockService) { }
+  constructor(private cd: ChangeDetectorRef, public Shared: SharedService, public auth: AuthService, private notesService: NotesService, private push: PushNotificationService, private reminderService: ReminderService, public keptPlugins: KeptPluginsService, private savedPlacesService: LocationSavedPlacesService, private zone: NgZone, private router: Router, public noteLock: NoteLockService, public preferences: UserPreferencesService) { }
 
   @ViewChild("main") main!: ElementRef<HTMLDivElement>
   //? Placeholder  ----------------------------------------------------
@@ -193,6 +195,7 @@ export class InputComponent implements OnInit {
   private cboxTouchIsDone = false;
   private cboxTouchStartX = 0;
   private cboxTouchStartY = 0;
+  private cboxTouchIndentHandled = false;
   private pendingCboxFocusPoint?: { id: number, x: number, y: number };
   private cboxTextTouch?: { id: number, x: number, y: number, moved: boolean, wasFocused: boolean, disabledEditing: boolean };
   private lastCboxTouchToggleAt = 0;
@@ -210,6 +213,7 @@ export class InputComponent implements OnInit {
   notesListSubscription?: Subscription;
   mobileComposerSubscription?: Subscription;
   closeMobileComposerSubscription?: Subscription;
+  preferencesSubscription?: Subscription;
   private coEditSaveInFlight = false;
   private coEditSaveQueued = false;
   private lastBodyRange?: Range
@@ -480,7 +484,7 @@ export class InputComponent implements OnInit {
   }
 
   private currentCheckBoxesForSave(updateModel: boolean) {
-    const next = this.checkBoxes.map(cb => ({ ...cb }))
+    const next = this.normalizeCheckBoxes(this.checkBoxes)
     const allCboxElements = this.noteContainer.nativeElement.querySelectorAll('[data-cbox-id]')
     allCboxElements.forEach((el: Element) => {
       const cboxEl = el as HTMLDivElement
@@ -592,8 +596,107 @@ export class InputComponent implements OnInit {
     return checkBoxes.map(item => ({
       id: item.id,
       done: !!item.done,
-      data: item.data || ''
+      data: item.data || '',
+      indentLevel: this.normalizedCboxIndentLevel(item.indentLevel)
     }))
+  }
+
+  checkboxIndentLevel(cb?: CheckboxI) {
+    return this.normalizedCboxIndentLevel(cb?.indentLevel)
+  }
+
+  checkboxIndentPx(cb?: CheckboxI) {
+    return this.checkboxIndentLevel(cb) * 32
+  }
+
+  checklistRowsForSection(isDone: boolean) {
+    return this.preferences.value.moveCompletedChecklistItemsToBottom
+      ? this.checkBoxes.filter(cb => cb.done === isDone)
+      : (isDone ? [] : this.checkBoxes)
+  }
+
+  completedChecklistCount() {
+    return this.checkBoxes.filter(cb => cb.done).length
+  }
+
+  private cboxSectionMatches(cb: CheckboxI, isDone: boolean) {
+    return !this.preferences.value.moveCompletedChecklistItemsToBottom || cb.done === isDone
+  }
+
+  private normalizedCboxIndentLevel(value: unknown) {
+    return Number(value) === 1 ? 1 : 0
+  }
+
+  private canIndentCboxAt(index: number) {
+    if (index <= 0) return false
+    return this.checkBoxes.slice(0, index).some(cb => this.checkboxIndentLevel(cb) === 0)
+  }
+
+  private setCboxIndentLevel(id: number, indentLevel: number, options: { commit?: boolean } = {}) {
+    this.syncCboxDomIntoModel()
+    const index = this.checkBoxes.findIndex(cb => cb.id === id)
+    if (index < 0) return false
+
+    const nextIndent = this.normalizedCboxIndentLevel(indentLevel)
+    if (nextIndent === 1 && !this.canIndentCboxAt(index)) return false
+    if (this.checkboxIndentLevel(this.checkBoxes[index]) === nextIndent) return false
+
+    this.checkBoxes[index] = { ...this.checkBoxes[index], indentLevel: nextIndent }
+    this.checkBoxes = [...this.checkBoxes]
+    this.noteToEdit.checkBoxes = this.checkBoxes
+    this.cd.detectChanges()
+
+    if (options.commit !== false) {
+      this.pushCboxHistorySnapshot()
+      this.queueCoEditAutosave()
+    }
+    return true
+  }
+
+  private childIndexesForParent(index: number) {
+    if (index < 0 || this.checkboxIndentLevel(this.checkBoxes[index]) !== 0) return []
+    const indexes: number[] = []
+    for (let i = index + 1; i < this.checkBoxes.length; i++) {
+      if (this.checkboxIndentLevel(this.checkBoxes[i]) === 0) break
+      indexes.push(i)
+    }
+    return indexes
+  }
+
+  private toggleCboxDoneWithChildren(id: number) {
+    this.syncCboxDomIntoModel()
+    const index = this.checkBoxes.findIndex(x => x.id === id)
+    if (index < 0) return false
+
+    const done = !this.checkBoxes[index].done
+    this.checkBoxes[index].done = done
+    for (const childIndex of this.childIndexesForParent(index)) {
+      this.checkBoxes[childIndex].done = done
+    }
+    this.checkBoxes = [...this.checkBoxes]
+    return true
+  }
+
+  private applyCboxIndentFromTouch(rawDx: number, rawDy: number) {
+    if (this.draggedCboxId === undefined) return false
+    const absDx = Math.abs(rawDx)
+    const absDy = Math.abs(rawDy)
+    if (absDx < 42 || absDx < absDy * 1.15) return false
+
+    if (!this.cboxTouchIndentHandled) {
+      const dragged = this.checkBoxes.find(cb => cb.id === this.draggedCboxId)
+      const currentIndent = this.checkboxIndentLevel(dragged)
+      const nextIndent = rawDx > 0
+        ? (currentIndent === 1 ? 0 : 1)
+        : currentIndent
+      const changed = this.setCboxIndentLevel(this.draggedCboxId, nextIndent, { commit: false })
+      if (changed) {
+        this.cboxDragOrderChanged = true
+        try { (navigator as any).vibrate?.(8) } catch {}
+      }
+      this.cboxTouchIndentHandled = true
+    }
+    return true
   }
 
   private cloneCheckBoxes(checkBoxes: CheckboxI[] = []) {
@@ -1169,11 +1272,13 @@ export class InputComponent implements OnInit {
     const cb = {
       done: false,
       data: data,
-      id: maxId + 1
+      id: maxId + 1,
+      indentLevel: 0
     }
     if (insertAfterId !== undefined) {
       const idx = this.checkBoxes.findIndex(item => item.id === insertAfterId)
       if (idx >= 0) {
+        cb.indentLevel = this.checkboxIndentLevel(this.checkBoxes[idx])
         this.checkBoxes.splice(idx + 1, 0, cb)
       } else {
         this.checkBoxes.push(cb)
@@ -1310,6 +1415,11 @@ export class InputComponent implements OnInit {
 
   cBoxKeyDown($event: KeyboardEvent, id: number) {
     let target = $event.target as HTMLDivElement
+    if ($event.key === 'Tab') {
+      $event.preventDefault()
+      this.setCboxIndentLevel(id, $event.shiftKey ? 0 : 1)
+      return
+    }
     if ($event.key === 'Enter') {
       $event.preventDefault()
       // Insert the new row immediately after the row Enter was hit in,
@@ -1409,6 +1519,7 @@ export class InputComponent implements OnInit {
   }
 
   private decorateLinksForEditor(html: string) {
+    if (!this.preferences.value.richLinkPreviews) return this.auth.authenticatedImageHtml(html || '')
     const div = document.createElement('div')
     div.innerHTML = this.auth.authenticatedImageHtml(html || '')
     this.removePreviewMarkup(div)
@@ -1503,6 +1614,7 @@ export class InputComponent implements OnInit {
   }
 
   private hydrateEditorLinkPreviews() {
+    if (!this.preferences.value.richLinkPreviews) return
     const body = this.noteBody?.nativeElement
     if (!body || this.destroyed) return
     const generation = this.editorPreviewGeneration
@@ -2305,7 +2417,7 @@ export class InputComponent implements OnInit {
   cboxDragOver(id: number, isDone: boolean, event: DragEvent) {
     if (this.draggedCboxId === undefined) return
     const draggedCb = this.checkBoxes.find(cb => cb.id === this.draggedCboxId)
-    if (!draggedCb || draggedCb.done !== isDone) return
+    if (!draggedCb || !this.cboxSectionMatches(draggedCb, isDone)) return
     event.preventDefault()
     event.stopPropagation()
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
@@ -2322,6 +2434,7 @@ export class InputComponent implements OnInit {
     this.cboxTouchStartY = touch.clientY
     this.cboxTouchIsDone = isDone
     this.cboxTouchDragging = false
+    this.cboxTouchIndentHandled = false
     this.cboxDragOrderChanged = false
     if (this.cboxTouchTimer) clearTimeout(this.cboxTouchTimer)
     this.cboxTouchTimer = setTimeout(() => {
@@ -2340,8 +2453,10 @@ export class InputComponent implements OnInit {
   cboxTouchMove(event: TouchEvent) {
     const touch = event.touches[0]
     if (!touch) return
-    const dx = Math.abs(touch.clientX - this.cboxTouchStartX)
-    const dy = Math.abs(touch.clientY - this.cboxTouchStartY)
+    const rawDx = touch.clientX - this.cboxTouchStartX
+    const rawDy = touch.clientY - this.cboxTouchStartY
+    const dx = Math.abs(rawDx)
+    const dy = Math.abs(rawDy)
 
     if (!this.cboxTouchDragging) {
       if ((dx > 14 || dy > 14) && this.cboxTouchTimer) {
@@ -2354,6 +2469,7 @@ export class InputComponent implements OnInit {
     event.preventDefault()
     event.stopPropagation()
     this.moveCboxDragImageToPoint(touch.clientX, touch.clientY)
+    if (this.applyCboxIndentFromTouch(rawDx, rawDy)) return
     const row = document.elementFromPoint(touch.clientX, touch.clientY)?.closest('[data-cbox-row-id]') as HTMLElement | null
     const id = Number(row?.dataset['cboxRowId'])
     if (Number.isNaN(id)) return
@@ -2373,7 +2489,7 @@ export class InputComponent implements OnInit {
   private reorderCboxAround(id: number, isDone: boolean, clientY: number) {
     if (this.draggedCboxId === undefined) return
     const draggedCb = this.checkBoxes.find(cb => cb.id === this.draggedCboxId)
-    if (!draggedCb || draggedCb.done !== isDone) return
+    if (!draggedCb || !this.cboxSectionMatches(draggedCb, isDone)) return
     if (id === this.draggedCboxId) return
 
     const row = document.querySelector<HTMLElement>(`[data-cbox-row-id="${id}"]`)
@@ -2407,7 +2523,7 @@ export class InputComponent implements OnInit {
     event.stopPropagation()
     if (this.draggedCboxId === undefined) return
     const draggedCb = this.checkBoxes.find(cb => cb.id === this.draggedCboxId)
-    if (!draggedCb || draggedCb.done !== isDone) return
+    if (!draggedCb || !this.cboxSectionMatches(draggedCb, isDone)) return
     this.persistCboxDragOrder()
     this.clearCboxDragState()
   }
@@ -2434,6 +2550,7 @@ export class InputComponent implements OnInit {
     this.draggedCboxId = undefined
     this.dragReadyCboxId = undefined
     this.cboxDragOrderChanged = false
+    this.cboxTouchIndentHandled = false
     this.cboxDragImage?.remove()
     this.cboxDragImage = undefined
   }
@@ -2473,7 +2590,7 @@ export class InputComponent implements OnInit {
     document.querySelectorAll<HTMLElement>('[data-cbox-row-id]').forEach(row => {
       const id = Number(row.dataset['cboxRowId'])
       const cb = this.checkBoxes.find(item => item.id === id)
-      if (cb?.done === isDone) rects.set(id, row.getBoundingClientRect())
+      if (cb && this.cboxSectionMatches(cb, isDone)) rects.set(id, row.getBoundingClientRect())
     })
     return rects
   }
@@ -2525,10 +2642,7 @@ export class InputComponent implements OnInit {
         this.queueCoEditAutosave()
       },
       check: () => {
-        this.syncCboxDomIntoModel()
-        const i = this.checkBoxes.findIndex(x => x.id === id)
-        if (i < 0) return
-        this.checkBoxes[i].done = !this.checkBoxes[i].done
+        if (!this.toggleCboxDoneWithChildren(id)) return
         this.pushCboxHistorySnapshot()
         this.queueCoEditAutosave()
       },
@@ -2572,7 +2686,7 @@ export class InputComponent implements OnInit {
     this.noteMain.nativeElement.style.backgroundColor = note.bgColor
     this.noteMain.nativeElement.style.borderColor = note.bgColor
     this.updateTextColor(note.bgColor)
-    this.checkBoxes = JSON.parse(JSON.stringify(note.checkBoxes || []))
+    this.checkBoxes = this.normalizeCheckBoxes(note.checkBoxes || [])
     this.resetCboxHistory()
     // Hybrid: latch BEFORE flipping isCbox so the noteBody ViewChild is
     // present after change detection (otherwise the body assignment below
@@ -2958,6 +3072,12 @@ export class InputComponent implements OnInit {
       }
     }
     this.bindKeyboardOffset();
+    this.preferencesSubscription = this.preferences.preferences$.subscribe(() => {
+      this.updateLastEditedTime();
+      this.destroyTimePicker();
+      this.decorateCurrentBodyLinks();
+      this.cd.detectChanges();
+    });
   }
 
   // Prevent the document body from rubber-banding/scrolling underneath the
@@ -3019,7 +3139,11 @@ export class InputComponent implements OnInit {
     
     let timeStr = '';
     if (isToday) {
-      timeStr = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      timeStr = date.toLocaleTimeString([], {
+        hour: this.preferences.value.useTwentyFourHourTime ? '2-digit' : 'numeric',
+        minute: '2-digit',
+        hour12: this.preferences.value.useTwentyFourHourTime ? false : undefined
+      });
     } else {
       timeStr = date.toLocaleDateString([], { month: 'short', day: 'numeric' });
     }
@@ -3047,6 +3171,7 @@ export class InputComponent implements OnInit {
     this.autoSaveSubscription?.unsubscribe();
     this.mobileComposerSubscription?.unsubscribe();
     this.closeMobileComposerSubscription?.unsubscribe();
+    this.preferencesSubscription?.unsubscribe();
     this.unbindKeyboardOffset();
     this.unbindAndroidBackgroundLocationResume();
     this.unlockBodyScroll();
@@ -3067,7 +3192,7 @@ export class InputComponent implements OnInit {
       }
     }
     if (!this.cboxDragImage) {
-      this.checkBoxes = JSON.parse(JSON.stringify(note.checkBoxes || []));
+      this.checkBoxes = this.normalizeCheckBoxes(note.checkBoxes || []);
       this.resetCboxHistory();
     }
     const oldDrawing = this.images.find(i => i.id === 'drawing');
@@ -3523,6 +3648,7 @@ export class InputComponent implements OnInit {
   }
 
   private createTimePicker(dateInput: HTMLInputElement | null, timeInput: HTMLInputElement) {
+    if (this.preferences.value.useTwentyFourHourTime) ensureTimepickerWheelPlugin()
     if (this.customTimePicker && this.customTimePickerInput === timeInput) {
       this.timePickerDateInput = dateInput || this.timePickerDateInput
       return
@@ -3532,8 +3658,14 @@ export class InputComponent implements OnInit {
     this.customTimePickerInput = timeInput
     timeInput.value = this.customTime || this.currentTimeValue()
     this.customTimePicker = new TimepickerUI(timeInput, {
-      clock: { currentTime: { time: new Date(), updateInput: true } },
-      ui: { editable: false },
+      clock: {
+        type: this.preferences.value.useTwentyFourHourTime ? '24h' : '12h',
+        currentTime: { time: new Date(), updateInput: true }
+      },
+      ui: {
+        mode: this.preferences.value.useTwentyFourHourTime ? 'compact-wheel' : 'clock',
+        editable: false
+      },
       callbacks: {
         onOpen: () => {
         },
@@ -3580,13 +3712,25 @@ export class InputComponent implements OnInit {
   }
 
   private currentTimeValue() {
-    return new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    return new Date().toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: this.preferences.value.useTwentyFourHourTime ? false : undefined
+    })
   }
 
   inHours(n: number): Date { return new Date(Date.now() + n * 60 * 60 * 1000) }
   tomorrow(): Date { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); return d }
   nextWeek(): Date { const d = new Date(); const daysUntilMonday = ((8 - d.getDay()) % 7) || 7; d.setDate(d.getDate() + daysUntilMonday); d.setHours(9, 0, 0, 0); return d }
-  formatReminderDate(isoString: string): string { return new Date(isoString).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) }
+  formatReminderDate(isoString: string): string {
+    return new Date(isoString).toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: this.preferences.value.useTwentyFourHourTime ? '2-digit' : 'numeric',
+      minute: '2-digit',
+      hour12: this.preferences.value.useTwentyFourHourTime ? false : undefined
+    })
+  }
 
   // ─── Location reminders ───────────────────────────────────────────────
 

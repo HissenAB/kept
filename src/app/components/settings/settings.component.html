@@ -148,6 +148,53 @@
       </section>
     </div>
 
+    <!-- ── Group: Display & Editing ────────────────────────────────────── -->
+    <div class="settings-group">
+      <h2 class="group-title color-blue">
+        <span class="material-symbols-outlined">tune</span>
+        Display & Editing
+      </h2>
+
+      <p class="section-desc">
+        Adjust how Kept presents times, checklist rows, and links on this device.
+      </p>
+
+      <div class="preferences-list">
+        <div class="preference-row">
+          <div class="preference-info">
+            <span class="preference-label">24-hour time</span>
+            <span class="preference-desc">Show reminder times without AM/PM.</span>
+          </div>
+          <label class="toggle-label">
+            <input type="checkbox" [checked]="useTwentyFourHourTime" (change)="toggleTwentyFourHourTime($event)">
+            <span class="toggle-text">{{useTwentyFourHourTime ? 'Enabled' : 'Disabled'}}</span>
+          </label>
+        </div>
+
+        <div class="preference-row">
+          <div class="preference-info">
+            <span class="preference-label">Move completed checklist items to bottom</span>
+            <span class="preference-desc">Turn off to keep checked items in their manual list order.</span>
+          </div>
+          <label class="toggle-label">
+            <input type="checkbox" [checked]="moveCompletedChecklistItemsToBottom" (change)="toggleMoveCompletedChecklistItems($event)">
+            <span class="toggle-text">{{moveCompletedChecklistItemsToBottom ? 'Enabled' : 'Disabled'}}</span>
+          </label>
+        </div>
+
+        <div class="preference-row">
+          <div class="preference-info">
+            <span class="preference-label">Rich link previews</span>
+            <span class="preference-desc">Turn off to show links as plain text instead of preview cards.</span>
+          </div>
+          <label class="toggle-label">
+            <input type="checkbox" [checked]="richLinkPreviews" (change)="toggleRichLinkPreviews($event)">
+            <span class="toggle-text">{{richLinkPreviews ? 'Enabled' : 'Disabled'}}</span>
+          </label>
+        </div>
+      </div>
+    </div>
+
     <!-- ── Group: Reminders & Calendars ─────────────────────────────────── -->
     <div class="settings-group">
       <h2 class="group-title color-purple">
@@ -351,7 +398,7 @@
     </div>
 
     <!-- ── Group: Native App Permissions ──────────────────────────────────────── -->
-    @if (isIos || isAndroid) {
+    @if (isIos || isAndroid || notificationPermissionsVisible) {
     <div class="settings-group permissions-group">
       <h2 class="group-title color-blue">
         <span class="material-symbols-outlined">security</span>
@@ -361,6 +408,33 @@
       <p class="section-desc">
         Manage the permissions Kept needs for reminders, voice capture, and location-based features.
       </p>
+
+      @if (notificationPermissionsVisible) {
+        <div class="permissions-list notification-permissions-list">
+          <div class="permission-row">
+            <div class="permission-info">
+              <span class="permission-label">Web notifications</span>
+              <span class="permission-desc">
+                Reminder alerts from this browser. You can dismiss the prompt and show it again here.
+              </span>
+            </div>
+            <div class="permission-action">
+              @if (notificationPermission === 'granted') {
+                <span class="permission-granted">
+                  <span class="material-symbols-outlined check-icon">check_circle</span>
+                  Granted
+                </span>
+              } @else if (notificationPermission === 'denied') {
+                <span class="permission-desc">Blocked in browser</span>
+              } @else {
+                <button type="button" class="btn-secondary btn-permission" (click)="showNotificationPrompt()">
+                  Show prompt
+                </button>
+              }
+            </div>
+          </div>
+        </div>
+      }
 
       @if (isAndroid) {
         <div class="permissions-list legacy-smart-capture-list">
