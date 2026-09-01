@@ -417,6 +417,10 @@ export class NotesService {
       this.load(this.searchQuery, { cacheBust: true }).catch(console.error);
       return result.id;
     } catch (error) {
+      if (this.auth.notifySessionExpired(error)) {
+        console.warn('Note was not saved because the session expired.');
+        throw error;
+      }
       if (!this.isOfflineError(error) || !this.offlineSync.partition) {
         console.log(error);
         return -1;
@@ -453,6 +457,7 @@ export class NotesService {
       this.mergeNoteIntoList({ ...object, id });
     } catch (error) {
       this.suppressedRealtimeReloads.delete(id);
+      if (this.auth.notifySessionExpired(error)) throw error;
       if (this.isOfflineError(error)) await this.offlineSync.enqueue('note.upsert', local.syncId!, local);
       else console.log(error)
     }
@@ -479,6 +484,7 @@ export class NotesService {
       this.mergeNoteIntoList({ ...object, id } as NoteI);
     } catch (error) {
       this.suppressedRealtimeReloads.delete(id);
+      if (this.auth.notifySessionExpired(error)) return;
       if (this.isOfflineError(error)) await this.offlineSync.enqueue('note.upsert', local.syncId!, local);
       else console.log(error)
     }

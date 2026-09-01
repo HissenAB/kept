@@ -1,4 +1,4 @@
-import { HttpClient, HttpHeaders } from '@angular/common/http';
+import { HttpClient, HttpErrorResponse, HttpHeaders } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 import { firstValueFrom, BehaviorSubject } from 'rxjs';
 import { environment } from 'src/environments/environment';
@@ -15,6 +15,7 @@ type LoginResponse = {
 export class AuthService {
   private readonly sessionKey = 'gk_session';
   private readonly apiUrl = environment.apiUrl;
+  private lastSessionExpiredNoticeAt = 0;
   currentUser$ = new BehaviorSubject<AuthSessionI | null>(this.getStoredSession());
 
   constructor(private http: HttpClient) {
@@ -35,6 +36,25 @@ export class AuthService {
 
   authHeaders() {
     return new HttpHeaders({ Authorization: `Bearer ${this.token}` });
+  }
+
+  isAuthExpiredError(error: unknown) {
+    return error instanceof HttpErrorResponse && error.status === 401;
+  }
+
+  notifySessionExpired(error?: unknown) {
+    if (error && !this.isAuthExpiredError(error)) return false;
+    const now = Date.now();
+    if (now - this.lastSessionExpiredNoticeAt < 4000) return true;
+    this.lastSessionExpiredNoticeAt = now;
+    try {
+      (window as any).Snackbar?.show({
+        pos: 'bottom-left',
+        text: 'Session expired. Please sign in again before saving.',
+        duration: 5200
+      });
+    } catch {}
+    return true;
   }
 
   canonicalImageUrl(value: string) {

@@ -5,12 +5,14 @@ export interface UserPreferences {
   useTwentyFourHourTime: boolean;
   moveCompletedChecklistItemsToBottom: boolean;
   richLinkPreviews: boolean;
+  notePreviewTextSize: 'compact' | 'default' | 'large';
 }
 
 const DEFAULT_PREFERENCES: UserPreferences = {
   useTwentyFourHourTime: false,
   moveCompletedChecklistItemsToBottom: true,
   richLinkPreviews: true,
+  notePreviewTextSize: 'default',
 };
 
 @Injectable({ providedIn: 'root' })
@@ -37,10 +39,15 @@ export class UserPreferencesService {
         useTwentyFourHourTime: parsed.useTwentyFourHourTime === true,
         moveCompletedChecklistItemsToBottom: parsed.moveCompletedChecklistItemsToBottom !== false,
         richLinkPreviews: parsed.richLinkPreviews !== false,
+        notePreviewTextSize: this.normalizeNotePreviewTextSize(parsed.notePreviewTextSize),
       };
     } catch {
       return { ...DEFAULT_PREFERENCES };
     }
+  }
+
+  private normalizeNotePreviewTextSize(value: unknown): UserPreferences['notePreviewTextSize'] {
+    return value === 'compact' || value === 'large' ? value : 'default';
   }
 
   private save(value: UserPreferences) {

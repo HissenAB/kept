@@ -212,7 +212,8 @@ Useful environment variables are documented in `docker-compose.yml`. The common 
 
 - `BASE_URL`: public URL for OAuth/callback generation when proxy headers are not enough.
 - `KEPT_SESSION_TTL_DAYS`: login session lifetime. Defaults to 30 days.
-- `KEPT_CORS_ALLOW_ALL` / `KEPT_CORS_ORIGINS`: CORS behavior for remote clients and native shells.
+- `KEPT_CORS_ALLOW_ALL` / `KEPT_CORS_ORIGINS`: CORS behavior for remote clients and native shells. Native app WebView origins are allowed automatically when using `KEPT_CORS_ORIGINS`.
+- `KEPT_TAKEOUT_UPLOAD_MAX`: Google Takeout ZIP upload cap. Defaults to `5GB`; only affects Takeout imports.
 - `PUID` / `PGID`: run the container as a specific Linux user/group.
 - `KEPT_ALLOW_RESTORE`: temporarily enables restore from backup during setup.
 - `VAPID_SUBJECT`: optional public URL/contact identity for web push. Kept auto-generates VAPID keys if you do not set them; only set this if push notifications need a more explicit public origin.

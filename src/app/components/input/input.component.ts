@@ -305,7 +305,8 @@ export class InputComponent implements OnInit {
     }
 
     // Otherwise, save and close
-    await this.saveNote()
+    const saved = await this.saveNote()
+    if (saved === false) return
     this.closeNote()
   }
 
@@ -405,7 +406,7 @@ export class InputComponent implements OnInit {
 
   //? note  -----------------------------------------------------
 
-  async saveNote(closeAfterSave = true) {
+  async saveNote(closeAfterSave = true): Promise<boolean | void> {
     if (closeAfterSave) this.cboxInput?.nativeElement.blur()
     if (this.isDrawingNote) this.syncDrawingImage()
     if (this.isCbox.value && this.cboxPh?.nativeElement.innerHTML.trim()) {
@@ -447,6 +448,9 @@ export class InputComponent implements OnInit {
           this.saveBaselineSnapshot = this.noteSaveSnapshot(noteObj)
           this.labelsDirty = false
           this.flushPendingReminderSaves(this.noteToEdit.id!, noteObj)
+        } catch (error) {
+          if (this.auth.isAuthExpiredError(error)) return false
+          throw error
         } finally {
           this.coEditSaveInFlight = false
           if (this.coEditSaveQueued) {
@@ -455,7 +459,12 @@ export class InputComponent implements OnInit {
           }
         }
       } else {
-        await this.notesService.update(noteObj, this.noteToEdit.id!)
+        try {
+          await this.notesService.update(noteObj, this.noteToEdit.id!)
+        } catch (error) {
+          if (this.auth.isAuthExpiredError(error)) return false
+          throw error
+        }
         this.saveBaselineSnapshot = this.noteSaveSnapshot(noteObj)
         this.labelsDirty = false
         this.updateLastEditedTime();
@@ -466,10 +475,16 @@ export class InputComponent implements OnInit {
     }
 
     if (hasContent) {
-        let id = await this.Shared.note.db.add(noteObj)
+        let id: number
+        try {
+          id = await this.Shared.note.db.add(noteObj)
+        } catch (error) {
+          if (this.auth.isAuthExpiredError(error)) return false
+          throw error
+        }
         if (!id || id === -1) {
-          if (closeAfterSave) this.showReminderSaveError()
-          return
+          if (closeAfterSave) this.showNoteSaveError()
+          return false
         }
         await this.uploadPendingAttachments(id)
         this.flushPendingReminderSaves(id, noteObj)
@@ -593,8 +608,27 @@ export class InputComponent implements OnInit {
   }
 
   private normalizeCheckBoxes(checkBoxes: CheckboxI[] = []) {
+    const numericIds = checkBoxes
+      .map(item => Number((item as any)?.id))
+      .filter(id => Number.isSafeInteger(id) && id >= 0)
+    let nextId = numericIds.length ? Math.max(...numericIds) + 1 : 0
+    const usedIds = new Set<number>()
+    const nextAvailableId = () => {
+      while (usedIds.has(nextId)) nextId++
+      return nextId++
+    }
+
     return checkBoxes.map(item => ({
-      id: item.id,
+      id: (() => {
+        const numericId = Number((item as any)?.id)
+        if (Number.isSafeInteger(numericId) && numericId >= 0 && !usedIds.has(numericId)) {
+          usedIds.add(numericId)
+          return numericId
+        }
+        const id = nextAvailableId()
+        usedIds.add(id)
+        return id
+      })(),
       done: !!item.done,
       data: item.data || '',
       indentLevel: this.normalizedCboxIndentLevel(item.indentLevel)
@@ -1268,7 +1302,10 @@ export class InputComponent implements OnInit {
 
   addCheckBox(data: string, insertAfterId?: number) {
     this.syncCboxDomIntoModel()
-    const maxId = this.checkBoxes.reduce((m, c) => Math.max(m, c.id ?? 0), -1)
+    const numericIds = this.checkBoxes
+      .map(c => Number(c.id))
+      .filter(id => Number.isSafeInteger(id) && id >= 0)
+    const maxId = numericIds.length ? Math.max(...numericIds) : -1
     const cb = {
       done: false,
       data: data,
@@ -4272,6 +4309,12 @@ export class InputComponent implements OnInit {
   private showReminderSaveError() {
     try {
       Snackbar.show({ pos: 'bottom-left', text: "Reminder couldn't be saved", duration: 3500 })
+    } catch {}
+  }
+
+  private showNoteSaveError() {
+    try {
+      Snackbar.show({ pos: 'bottom-left', text: "Note couldn't be saved", duration: 3500 })
     } catch {}
   }
 }

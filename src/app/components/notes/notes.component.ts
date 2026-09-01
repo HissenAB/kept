@@ -35,6 +35,10 @@ export class NotesComponent implements OnInit, OnDestroy, AfterViewChecked {
   readonly nativePhoneLayout = isNativePhonePlatform()
   constructor(public Shared: SharedService, private router: Router, public auth: AuthService, public reminderService: ReminderService, private zone: NgZone, public notesService: NotesService, private cd: ChangeDetectorRef, private notesTools: NotesToolsPipe, public noteLock: NoteLockService, public preferences: UserPreferencesService) { }
 
+  get notePreviewTextSizeClass() {
+    return `preview-text-${this.preferences.value.notePreviewTextSize}`;
+  }
+
   private subscriptions: Subscription[] = []
 
   @ViewChild("mainContainer") mainContainer!: ElementRef<HTMLInputElement>

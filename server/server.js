@@ -22,6 +22,7 @@ const port = Number(process.env.PORT || 3000);
 const dataDir = path.join(__dirname, '..', 'data');
 const uploadDir = path.join(dataDir, 'uploads');
 const attachmentDir = path.join(dataDir, 'attachments');
+const takeoutTmpDir = path.join(dataDir, 'imports', 'tmp');
 const dbPath = process.env.SQLITE_PATH || path.join(dataDir, 'kept.sqlite');
 const vapidPath = path.join(dataDir, 'vapid.json');
 const staticDir = path.join(__dirname, '..', 'dist', 'keep');
@@ -29,6 +30,7 @@ const staticDir = path.join(__dirname, '..', 'dist', 'keep');
 fs.mkdirSync(dataDir, { recursive: true });
 fs.mkdirSync(uploadDir, { recursive: true });
 fs.mkdirSync(attachmentDir, { recursive: true });
+fs.mkdirSync(takeoutTmpDir, { recursive: true });
 
 const KEPT_VERSION = (() => {
   try {
@@ -3139,17 +3141,26 @@ function startReminderScheduler() {
 //     docker-compose.yml for the full security tradeoff.
 //
 //   KEPT_CORS_ORIGINS=https://app.example.com,https://kept.example.com
-//     Comma-separated allowlist. Most secure of the three. Required if you
-//     ever switch Kept to cookie-based sessions.
+//     Comma-separated allowlist. Kept also allows exact native-shell origins
+//     so the iOS/Android apps can connect while browser access stays pinned
+//     to your configured domains. Required if you ever switch Kept to
+//     cookie-based sessions.
 //
 // If both are set, the explicit allowlist wins.
 const corsAllowlist = String(process.env.KEPT_CORS_ORIGINS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
+const nativeShellOrigins = new Set([
+  'capacitor://localhost',
+  'ionic://localhost',
+  'http://localhost',
+  'https://localhost'
+]);
 if (corsAllowlist.length) {
+  const allowedOrigins = new Set([...corsAllowlist, ...nativeShellOrigins]);
   app.use(cors({
     origin: (origin, cb) => {
       if (!origin) return cb(null, true); // same-origin / curl
-      cb(null, corsAllowlist.includes(origin));
+      cb(null, allowedOrigins.has(origin));
     },
     credentials: true
   }));
@@ -6730,9 +6741,49 @@ const KEEP_COLOR_MAP = {
   BROWN: '#fddcbb',
 };
 
+function parseByteSize(value, fallbackBytes) {
+  if (value === undefined || value === null || value === '') return fallbackBytes;
+  const raw = String(value).trim();
+  const match = raw.match(/^(\d+(?:\.\d+)?)\s*(b|kb|kib|mb|mib|gb|gib)?$/i);
+  if (!match) return fallbackBytes;
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return fallbackBytes;
+  const unit = String(match[2] || 'b').toLowerCase();
+  const multiplier = unit === 'gb' || unit === 'gib'
+    ? 1024 ** 3
+    : unit === 'mb' || unit === 'mib'
+      ? 1024 ** 2
+      : unit === 'kb' || unit === 'kib'
+        ? 1024
+        : 1;
+  return Math.floor(amount * multiplier);
+}
+
+function formatBytes(bytes) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = Number(bytes) || 0;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex++;
+  }
+  return `${value >= 10 || unitIndex === 0 ? Math.round(value) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+const TAKEOUT_UPLOAD_MAX_BYTES = parseByteSize(
+  process.env.KEPT_TAKEOUT_UPLOAD_MAX || process.env.KEPT_TAKEOUT_UPLOAD_MAX_BYTES,
+  5 * 1024 * 1024 * 1024
+);
+
 const uploadZip = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 500 * 1024 * 1024 },
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, takeoutTmpDir),
+    filename: (_req, file, cb) => {
+      const originalExt = path.extname(file.originalname || '').toLowerCase() || '.zip';
+      cb(null, `takeout-${Date.now()}-${randomHex(12)}${originalExt}`);
+    }
+  }),
+  limits: { fileSize: TAKEOUT_UPLOAD_MAX_BYTES },
   fileFilter: (_req, file, cb) => {
     const ok = file.mimetype === 'application/zip'
       || file.mimetype === 'application/x-zip-compressed'
@@ -6741,12 +6792,44 @@ const uploadZip = multer({
   }
 });
 
+function googleTakeoutUpload(req, res, next) {
+  uploadZip.single('takeout')(req, res, (error) => {
+    if (!error) return next();
+    if (req.file?.path) fs.promises.unlink(req.file.path).catch(() => {});
+    if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({
+        error: `Google Takeout ZIP is too large for this Kept server. The current Takeout upload limit is ${formatBytes(TAKEOUT_UPLOAD_MAX_BYTES)}. If this failed below that size, your proxy/CDN may be rejecting the upload before Kept receives it. Try importing over a direct LAN/SSH connection or raise your proxy upload limit.`
+      });
+    }
+    if (error.message === 'Only ZIP files are supported.') {
+      return res.status(400).json({ error: error.message });
+    }
+    next(error);
+  });
+}
+
+async function cleanupStaleTakeoutUploads(maxAgeMs = 24 * 60 * 60 * 1000) {
+  try {
+    const files = await fs.promises.readdir(takeoutTmpDir);
+    const cutoff = Date.now() - maxAgeMs;
+    await Promise.all(files.map(async (file) => {
+      const filePath = path.join(takeoutTmpDir, file);
+      const stat = await fs.promises.stat(filePath).catch(() => null);
+      if (stat?.isFile() && stat.mtimeMs < cutoff) {
+        await fs.promises.unlink(filePath).catch(() => {});
+      }
+    }));
+  } catch (error) {
+    console.warn('Takeout temp cleanup failed:', error.message);
+  }
+}
+
 // Limits for Google Takeout zips. Real Keep exports are usually well under
 // these caps; the goal is to prevent zip bombs and path-traversal entries
 // without breaking large legitimate exports.
-const TAKEOUT_MAX_ENTRIES = 50_000;
-const TAKEOUT_MAX_PER_ENTRY_BYTES = 100 * 1024 * 1024;     // 100 MB per file
-const TAKEOUT_MAX_TOTAL_BYTES = 5 * 1024 * 1024 * 1024;    // 5 GB combined
+const TAKEOUT_MAX_ENTRIES = 100_000;
+const TAKEOUT_MAX_PER_ENTRY_BYTES = 250 * 1024 * 1024;     // 250 MB per file
+const TAKEOUT_MAX_TOTAL_BYTES = 10 * 1024 * 1024 * 1024;   // 10 GB combined
 const TAKEOUT_MAX_FILENAME_LEN = 1024;
 
 function normalizeZipEntryName(name) {
@@ -6820,7 +6903,7 @@ function importedKeepChecklistItems(listContent, fallbackLevel = 0, state = { ne
     const rawText = keepListText(item);
     const indentLevel = keepListIndentLevel(item, fallbackLevel);
     checkBoxes.push({
-      id: `imp-${Date.now()}-${state.nextId++}`,
+      id: state.nextId++,
       data: escapeHtml(rawText.replace(/^(?:\t| {2,}|\u00a0{2,})/, '')),
       done: !!(item?.isChecked ?? item?.checked ?? item?.done),
       indentLevel
@@ -6835,13 +6918,13 @@ function importedKeepChecklistItems(listContent, fallbackLevel = 0, state = { ne
   return checkBoxes;
 }
 
-async function readZipEntries(buffer) {
+async function readZipEntries(filePath) {
   let admZipError;
   let rawEntries;
   let getRawData;
   try {
     const AdmZip = require('adm-zip');
-    const zip = new AdmZip(buffer);
+    const zip = new AdmZip(filePath);
     rawEntries = zip.getEntries();
     getRawData = (entry) => entry.getData();
   } catch (error) {
@@ -6851,7 +6934,7 @@ async function readZipEntries(buffer) {
   if (!rawEntries) {
     try {
       const unzipper = require('unzipper');
-      const directory = await unzipper.Open.buffer(buffer);
+      const directory = await unzipper.Open.file(filePath);
       rawEntries = directory.files.map(file => ({
         entryName: file.path,
         isDirectory: file.type === 'Directory' || /\/$/.test(file.path),
@@ -6883,11 +6966,11 @@ async function readZipEntries(buffer) {
         const data = await getRawData(raw);
         if (!data) return Buffer.alloc(0);
         if (data.length > TAKEOUT_MAX_PER_ENTRY_BYTES) {
-          throw new Error(`Entry "${normalized}" is too large (${data.length} bytes). Max ${TAKEOUT_MAX_PER_ENTRY_BYTES}.`);
+          throw new Error(`Entry "${normalized}" is too large (${formatBytes(data.length)}). Max ${formatBytes(TAKEOUT_MAX_PER_ENTRY_BYTES)}.`);
         }
         totalExtracted += data.length;
         if (totalExtracted > TAKEOUT_MAX_TOTAL_BYTES) {
-          throw new Error('ZIP expands beyond the safe extraction limit (possible zip bomb).');
+          throw new Error(`ZIP expands beyond the safe extraction limit (${formatBytes(TAKEOUT_MAX_TOTAL_BYTES)}).`);
         }
         return data;
       }
@@ -6896,164 +6979,174 @@ async function readZipEntries(buffer) {
   return entries;
 }
 
-app.post('/api/import/google-takeout', requireAuth, uploadZip.single('takeout'), asyncRoute(async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
-
-  let entries;
+app.post('/api/import/google-takeout', requireAuth, googleTakeoutUpload, asyncRoute(async (req, res) => {
+  const tempPath = req.file?.path;
   try {
-    entries = await readZipEntries(req.file.buffer);
-  } catch (error) {
-    return res.status(400).json({ error: error.message });
-  }
+    if (!req.file || !tempPath) return res.status(400).json({ error: 'No file uploaded.' });
 
-  const attachmentsByName = {};
-  for (const e of entries) {
-    if (!e.isDirectory) attachmentsByName[path.basename(e.entryName)] = e;
-  }
-
-  const jsonEntries = entries.filter(isKeepJsonEntry);
-  if (!jsonEntries.length) {
-    return res.status(400).json({ error: 'No Google Keep notes found in this ZIP. Upload the full Takeout ZIP that contains Takeout/Keep/*.json files.' });
-  }
-
-  let imported = 0, skipped = 0, errors = 0, pinnedCount = 0, deduped = 0;
-  const now = new Date().toISOString();
-  const fieldPresence = { isPinned: 0, pinned: 0, isArchived: 0, archived: 0 };
-
-  // Build a fingerprint set of existing notes for this user so re-running
-  // the takeout import doesn't silently double everything. Fingerprint =
-  // createdAt + first 200 chars of title + body, which Google's exports
-  // keep stable across re-exports.
-  const existingFingerprints = new Set();
-  const existingRows = await all('SELECT noteTitle, noteBody, createdAt FROM notes WHERE ownerUserId = ?', [req.user.id]);
-  for (const row of existingRows) {
-    const fp = `${row.createdAt}|${(row.noteTitle || '').slice(0, 200)}|${(row.noteBody || '').slice(0, 200)}`;
-    existingFingerprints.add(fp);
-  }
-
-  await run('BEGIN IMMEDIATE TRANSACTION');
-  try {
-    for (const entry of jsonEntries) {
-      try {
-        let note;
-        try { note = JSON.parse((await entry.getData()).toString('utf8')); }
-        catch (e) {
-          if (e && /zip bomb|too many entries|too large|unsafe entry/i.test(e.message)) throw e;
-          errors++; continue;
-        }
-
-        if (note.isTrashed) { skipped++; continue; }
-
-        const bgColor = KEEP_COLOR_MAP[note.color] ?? '';
-
-        let noteBody = '';
-        if (note.textContent) {
-          noteBody = note.textContent
-            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-            .replace(/\n/g, '<br>');
-        }
-        if (note.annotations?.length) {
-          const links = note.annotations
-            .filter(a => a.url)
-            .map(a => `<a href="${a.url}" target="_blank" rel="noopener">${a.title || a.url}</a>`)
-            .join('<br>');
-          if (links) noteBody = noteBody ? `${noteBody}<br>${links}` : links;
-        }
-
-        let isCbox = 0, checkBoxes = [];
-        if (note.listContent?.length) {
-          isCbox = 1;
-          checkBoxes = importedKeepChecklistItems(note.listContent);
-        }
-
-        const images = [];
-        for (const att of (note.attachments || [])) {
-          const attMimeType = String(att.mimetype || '').toLowerCase();
-          if (!SAFE_IMAGE_TYPES.has(attMimeType)) continue;
-          const basename = path.basename(att.filePath || '');
-          const attEntry = attachmentsByName[basename];
-          if (!attEntry) continue;
-          try {
-            const ext = SAFE_IMAGE_TYPES.get(attMimeType);
-            const filename = `${Date.now()}-${randomHex(12)}${ext}`;
-            const data = await attEntry.getData();
-            fs.writeFileSync(path.join(uploadDir, filename), data);
-            images.push({ id: `img-${Date.now()}`, dataUrl: `${PRIVATE_IMAGE_PREFIX}${filename}`, name: basename, placement: 'top' });
-          } catch (e) {
-            if (e && /zip bomb|too many entries|too large|unsafe entry/i.test(e.message)) throw e;
-            /* skip image */
-          }
-        }
-
-        const labels = [];
-        const seenLabels = new Set();
-        for (const rawLabel of (note.labels || [])) {
-          const labelName = String(rawLabel?.name || '').trim();
-          if (!labelName) continue;
-          const labelKey = labelName.toLowerCase();
-          if (seenLabels.has(labelKey)) continue;
-          seenLabels.add(labelKey);
-          const label = await findOrCreateLabelForUser(req.user.id, labelName);
-          labels.push({ id: label.id, name: label.name, added: true });
-        }
-        const createdAt = note.createdTimestampUsec ? new Date(note.createdTimestampUsec / 1000).toISOString() : now;
-        const updatedAt = note.userEditedTimestampUsec ? new Date(note.userEditedTimestampUsec / 1000).toISOString() : now;
-
-        // Skip notes that look like a re-import of something already present.
-        const noteTitle = plainText(note.title || '') || '';
-        const fingerprint = `${createdAt}|${noteTitle.slice(0, 200)}|${noteBody.slice(0, 200)}`;
-        if (existingFingerprints.has(fingerprint)) { deduped++; continue; }
-        existingFingerprints.add(fingerprint);
-
-        // Google Keep Takeout uses `isPinned`; older or third-party exports
-        // sometimes use `pinned`. Accept either to avoid silently dropping pins.
-        if ('isPinned' in note) fieldPresence.isPinned++;
-        if ('pinned' in note) fieldPresence.pinned++;
-        if ('isArchived' in note) fieldPresence.isArchived++;
-        if ('archived' in note) fieldPresence.archived++;
-        const pinnedFlag = (note.isPinned || note.pinned) ? 1 : 0;
-        const archivedFlag = (note.isArchived || note.archived) ? 1 : 0;
-        if (pinnedFlag) pinnedCount++;
-        // Keep imported notes in their original Keep recency order instead of
-        // treating the import itself as the note date.
-        const importSortOrder = new Date(updatedAt || createdAt || now).getTime() || Date.now();
-        const lww = serverLwwStamp();
-        const insertResult = await run(
-          `INSERT INTO notes (ownerUserId, syncId, noteTitle, noteBody, pinned, bgColor, bgImage, checkBoxes, images, isCbox, labels, binder, archived, trashed, sortOrder, createdAt, updatedAt, lastEditorUserId, lwwPhysicalMs, lwwLogical, lwwDeviceId, lwwOperationId)
-           VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, '', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [req.user.id, `note-${crypto.randomUUID()}`, noteTitle, noteBody, pinnedFlag, bgColor,
-           JSON.stringify(checkBoxes), JSON.stringify(images), isCbox, JSON.stringify(labels),
-           archivedFlag, importSortOrder, createdAt, updatedAt, req.user.id,
-           lww.physicalMs, lww.logical, lww.deviceId, lww.operationId]
-        );
-        // The /api/notes endpoint resolves `pinned` from the per-user
-        // `user_pins` table, not the legacy `notes.pinned` column. Without
-        // this insert, takeout-imported pinned notes would never appear
-        // pinned in the UI.
-        if (pinnedFlag) {
-          await run('INSERT OR IGNORE INTO user_pins (userId, noteId) VALUES (?, ?)', [req.user.id, insertResult.id]);
-        }
-        await syncNoteImagesForNote(insertResult.id, req.user.id, { noteBody, images });
-        await recordNoteSyncChange(insertResult.id, 'upsert', [req.user.id]);
-        imported++;
-      } catch (e) { console.error('Takeout import error:', entry.entryName, e.message); errors++; }
-    }
-    await run('COMMIT');
-  } catch (error) {
-    await run('ROLLBACK');
-    if (error && /zip bomb|too many entries|too large|unsafe entry/i.test(error.message)) {
+    let entries;
+    try {
+      entries = await readZipEntries(tempPath);
+    } catch (error) {
       return res.status(400).json({ error: error.message });
     }
-    throw error;
+
+    const attachmentsByName = {};
+    for (const e of entries) {
+      if (!e.isDirectory) attachmentsByName[path.basename(e.entryName)] = e;
+    }
+
+    const jsonEntries = entries.filter(isKeepJsonEntry);
+    if (!jsonEntries.length) {
+      return res.status(400).json({ error: 'No Google Keep notes found in this ZIP. Upload the full Takeout ZIP that contains Takeout/Keep/*.json files. If your ZIP is large and this appears incorrectly, try importing over a direct LAN/SSH connection because some proxies/CDNs reject large uploads before Kept can inspect them.' });
+    }
+
+    let imported = 0, skipped = 0, errors = 0, pinnedCount = 0, deduped = 0;
+    const now = new Date().toISOString();
+    const fieldPresence = { isPinned: 0, pinned: 0, isArchived: 0, archived: 0 };
+
+    // Build a fingerprint set of existing notes for this user so re-running
+    // the takeout import doesn't silently double everything. Fingerprint =
+    // createdAt + first 200 chars of title + body, which Google's exports
+    // keep stable across re-exports.
+    const existingFingerprints = new Set();
+    const existingRows = await all('SELECT noteTitle, noteBody, createdAt FROM notes WHERE ownerUserId = ?', [req.user.id]);
+    for (const row of existingRows) {
+      const fp = `${row.createdAt}|${(row.noteTitle || '').slice(0, 200)}|${(row.noteBody || '').slice(0, 200)}`;
+      existingFingerprints.add(fp);
+    }
+
+    await run('BEGIN IMMEDIATE TRANSACTION');
+    try {
+      for (const entry of jsonEntries) {
+        try {
+          let note;
+          try { note = JSON.parse((await entry.getData()).toString('utf8')); }
+          catch (e) {
+            if (e && /zip bomb|too many entries|too large|unsafe entry/i.test(e.message)) throw e;
+            errors++; continue;
+          }
+
+          if (note.isTrashed) { skipped++; continue; }
+
+          const bgColor = KEEP_COLOR_MAP[note.color] ?? '';
+
+          let noteBody = '';
+          if (note.textContent) {
+            noteBody = note.textContent
+              .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+              .replace(/\n/g, '<br>');
+          }
+          if (note.annotations?.length) {
+            const links = note.annotations
+              .filter(a => a.url)
+              .map(a => `<a href="${a.url}" target="_blank" rel="noopener">${a.title || a.url}</a>`)
+              .join('<br>');
+            if (links) noteBody = noteBody ? `${noteBody}<br>${links}` : links;
+          }
+
+          let isCbox = 0, checkBoxes = [];
+          if (note.listContent?.length) {
+            isCbox = 1;
+            checkBoxes = importedKeepChecklistItems(note.listContent);
+          }
+
+          const images = [];
+          for (const att of (note.attachments || [])) {
+            const attMimeType = String(att.mimetype || '').toLowerCase();
+            if (!SAFE_IMAGE_TYPES.has(attMimeType)) continue;
+            const basename = path.basename(att.filePath || '');
+            const attEntry = attachmentsByName[basename];
+            if (!attEntry) continue;
+            try {
+              const ext = SAFE_IMAGE_TYPES.get(attMimeType);
+              const filename = `${Date.now()}-${randomHex(12)}${ext}`;
+              const data = await attEntry.getData();
+              fs.writeFileSync(path.join(uploadDir, filename), data);
+              images.push({ id: `img-${Date.now()}`, dataUrl: `${PRIVATE_IMAGE_PREFIX}${filename}`, name: basename, placement: 'top' });
+            } catch (e) {
+              if (e && /zip bomb|too many entries|too large|unsafe entry/i.test(e.message)) throw e;
+              /* skip image */
+            }
+          }
+
+          const labels = [];
+          const seenLabels = new Set();
+          for (const rawLabel of (note.labels || [])) {
+            const labelName = String(rawLabel?.name || '').trim();
+            if (!labelName) continue;
+            const labelKey = labelName.toLowerCase();
+            if (seenLabels.has(labelKey)) continue;
+            seenLabels.add(labelKey);
+            const label = await findOrCreateLabelForUser(req.user.id, labelName);
+            labels.push({ id: label.id, name: label.name, added: true });
+          }
+          const createdAt = note.createdTimestampUsec ? new Date(note.createdTimestampUsec / 1000).toISOString() : now;
+          const updatedAt = note.userEditedTimestampUsec ? new Date(note.userEditedTimestampUsec / 1000).toISOString() : now;
+
+          // Skip notes that look like a re-import of something already present.
+          const noteTitle = plainText(note.title || '') || '';
+          const fingerprint = `${createdAt}|${noteTitle.slice(0, 200)}|${noteBody.slice(0, 200)}`;
+          if (existingFingerprints.has(fingerprint)) { deduped++; continue; }
+          existingFingerprints.add(fingerprint);
+
+          // Google Keep Takeout uses `isPinned`; older or third-party exports
+          // sometimes use `pinned`. Accept either to avoid silently dropping pins.
+          if ('isPinned' in note) fieldPresence.isPinned++;
+          if ('pinned' in note) fieldPresence.pinned++;
+          if ('isArchived' in note) fieldPresence.isArchived++;
+          if ('archived' in note) fieldPresence.archived++;
+          const pinnedFlag = (note.isPinned || note.pinned) ? 1 : 0;
+          const archivedFlag = (note.isArchived || note.archived) ? 1 : 0;
+          if (pinnedFlag) pinnedCount++;
+          // Keep imported notes in their original Keep recency order instead of
+          // treating the import itself as the note date.
+          const importSortOrder = new Date(updatedAt || createdAt || now).getTime() || Date.now();
+          const lww = serverLwwStamp();
+          const insertResult = await run(
+            `INSERT INTO notes (ownerUserId, syncId, noteTitle, noteBody, pinned, bgColor, bgImage, checkBoxes, images, isCbox, labels, binder, archived, trashed, sortOrder, createdAt, updatedAt, lastEditorUserId, lwwPhysicalMs, lwwLogical, lwwDeviceId, lwwOperationId)
+             VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, '', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [req.user.id, `note-${crypto.randomUUID()}`, noteTitle, noteBody, pinnedFlag, bgColor,
+             JSON.stringify(checkBoxes), JSON.stringify(images), isCbox, JSON.stringify(labels),
+             archivedFlag, importSortOrder, createdAt, updatedAt, req.user.id,
+             lww.physicalMs, lww.logical, lww.deviceId, lww.operationId]
+          );
+          // The /api/notes endpoint resolves `pinned` from the per-user
+          // `user_pins` table, not the legacy `notes.pinned` column. Without
+          // this insert, takeout-imported pinned notes would never appear
+          // pinned in the UI.
+          if (pinnedFlag) {
+            await run('INSERT OR IGNORE INTO user_pins (userId, noteId) VALUES (?, ?)', [req.user.id, insertResult.id]);
+          }
+          await syncNoteImagesForNote(insertResult.id, req.user.id, { noteBody, images });
+          await recordNoteSyncChange(insertResult.id, 'upsert', [req.user.id]);
+          imported++;
+        } catch (e) {
+          console.error('Takeout import error:', entry.entryName, e.message);
+          errors++;
+        }
+      }
+      await run('COMMIT');
+    } catch (error) {
+      await run('ROLLBACK');
+      if (error && /zip bomb|too many entries|too large|unsafe entry/i.test(error.message)) {
+        return res.status(400).json({ error: error.message });
+      }
+      throw error;
+    }
+
+    console.log(
+      `[Takeout import] user=${req.user.id} total=${jsonEntries.length} imported=${imported} skipped=${skipped} deduped=${deduped} errors=${errors} pinned=${pinnedCount}`,
+      'fields=', fieldPresence
+    );
+
+    broadcastRealtime([req.user.id], { type: 'notes-changed' });
+    res.json({ imported, skipped, deduped, errors, pinnedCount, total: jsonEntries.length, fieldPresence });
+  } finally {
+    if (tempPath) {
+      fs.promises.unlink(tempPath).catch(() => {});
+    }
   }
-
-  console.log(
-    `[Takeout import] user=${req.user.id} total=${jsonEntries.length} imported=${imported} skipped=${skipped} deduped=${deduped} errors=${errors} pinned=${pinnedCount}`,
-    'fields=', fieldPresence
-  );
-
-  broadcastRealtime([req.user.id], { type: 'notes-changed' });
-  res.json({ imported, skipped, deduped, errors, pinnedCount, total: jsonEntries.length, fieldPresence });
 }));
 
 if (fs.existsSync(staticDir)) {
@@ -7065,7 +7158,9 @@ if (fs.existsSync(staticDir)) {
 
 app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) {
-    const message = error.code === 'LIMIT_FILE_SIZE' ? 'File is too large.' : error.message;
+    const message = error.code === 'LIMIT_FILE_SIZE'
+      ? 'File is too large for this upload.'
+      : error.message;
     return res.status(400).json({ error: message });
   }
   if (String(error?.message || '').startsWith('Only PNG, JPG, GIF, and WEBP uploads are supported.') || error.message === 'Only ZIP files are supported.' || error.message === 'This file type is not allowed. Supported formats: PDF, Office documents, text files, and archives.') {
@@ -7084,6 +7179,7 @@ init().then(() => {
   setupRealtime();
   startReminderScheduler();
   startBackupScheduler();
+  cleanupStaleTakeoutUploads();
   server.listen(port, () => {
     console.log(`Keep API listening on http://127.0.0.1:${port}`);
     console.log(`Keep realtime listening on ws://127.0.0.1:${port}/api/realtime`);

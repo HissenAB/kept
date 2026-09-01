@@ -237,6 +237,9 @@
   margin-right: 4px;
   visibility: hidden;
   margin-left: auto;
+  border-radius: 50%;
+  color: #5f6368;
+  transition: background-color 0.16s ease, color 0.16s ease, opacity 0.16s ease;
   @extend %ic;
 
   &.min {
@@ -245,7 +248,27 @@
   }
 
   &:hover {
-    opacity: 0.87;
+    background-color: #3c4043;
+    color: #3c4043;
+    opacity: 1;
+  }
+}
+
+body.light-theme .cbox-cancel-icon {
+  color: #5f6368;
+
+  &:hover {
+    background-color: #202124;
+    color: #202124;
+  }
+}
+
+body.dark-theme .cbox-cancel-icon {
+  color: #bdc1c6;
+
+  &:hover {
+    background-color: #ffffff;
+    color: #ffffff;
   }
 }
 

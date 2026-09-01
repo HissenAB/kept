@@ -111,6 +111,12 @@ export class SettingsComponent implements OnInit, OnDestroy {
   useTwentyFourHourTime = false;
   moveCompletedChecklistItemsToBottom = true;
   richLinkPreviews = true;
+  notePreviewTextSize: 'compact' | 'default' | 'large' = 'default';
+  readonly notePreviewTextSizeOptions: Array<{ value: 'compact' | 'default' | 'large'; label: string }> = [
+    { value: 'compact', label: 'Compact' },
+    { value: 'default', label: 'Default' },
+    { value: 'large', label: 'Large' }
+  ];
   permissionsStatus: PermissionsStatus | null = null;
   isLoadingPermissions = false;
   isRequestingPermission: string | null = null;
@@ -202,6 +208,11 @@ export class SettingsComponent implements OnInit, OnDestroy {
     this.preferences.update({ richLinkPreviews: this.richLinkPreviews });
   }
 
+  setNotePreviewTextSize(size: 'compact' | 'default' | 'large') {
+    this.notePreviewTextSize = size;
+    this.preferences.update({ notePreviewTextSize: size });
+  }
+
   private refreshNotificationPermissionState() {
     this.notificationPermissionsVisible = this.push.notificationsSupported();
     this.notificationPermission = this.push.notificationPermission();
@@ -213,6 +224,7 @@ export class SettingsComponent implements OnInit, OnDestroy {
     this.useTwentyFourHourTime = value.useTwentyFourHourTime;
     this.moveCompletedChecklistItemsToBottom = value.moveCompletedChecklistItemsToBottom;
     this.richLinkPreviews = value.richLinkPreviews;
+    this.notePreviewTextSize = value.notePreviewTextSize;
   }
 
   private async loadAll() {
@@ -499,7 +511,13 @@ export class SettingsComponent implements OnInit, OnDestroy {
       // UI showing pre-import state until the user manually refreshes.
       try { await this.notesService.load(); } catch {}
     } catch (e: any) {
-      this.takeoutError = e?.error?.error || 'Import failed. Make sure you uploaded a Google Takeout ZIP containing a Keep folder.';
+      if (e?.status === 413) {
+        this.takeoutError = e?.error?.error || 'That Takeout ZIP is too large for this server or proxy. Try importing directly over LAN/SSH, or raise your proxy upload limit.';
+      } else if (e?.status === 0) {
+        this.takeoutError = 'Import upload could not reach Kept. Large Takeout ZIPs may be blocked by Cloudflare, Nginx, or another proxy before Kept can read them. Try importing directly over LAN/SSH.';
+      } else {
+        this.takeoutError = e?.error?.error || 'Import failed. If this is a large Takeout ZIP, try importing directly over LAN/SSH or raise your proxy upload limit.';
+      }
     } finally {
       this.isImportingTakeout = false;
       (event.target as HTMLInputElement).value = '';

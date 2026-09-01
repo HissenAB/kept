@@ -4,7 +4,8 @@
     (change)="overviewImageInputChange($event)">
   <section #mainContainer class="main-container" [class.is-dragging]="!!draggedNoteId"
     [class.native-phone-layout]="nativePhoneLayout"
-    [class.grid-view]="Shared.noteViewType.value === 'grid'">
+    [class.grid-view]="Shared.noteViewType.value === 'grid'"
+    [ngClass]="notePreviewTextSizeClass">
     <div class="pb-80" [hidden]="!(Shared.note.pinned | notesTools:currentPageName:Shared.searchQuery:Shared.searchScope.value).length">
       <p #title _title>pinned</p>
       <ng-container [ngTemplateOutlet]="noteTemplate" [ngTemplateOutletContext]="{notes:Shared.note.pinned}">

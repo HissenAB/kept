@@ -24,7 +24,7 @@
       <section class="settings-section takeout-section">
         <div class="section-title">Import from Google Keep</div>
         <p class="section-desc">
-          Import your notes from a Google Takeout export. Colors, images, links, checklists, and labels are preserved where possible.
+          Import your notes from a Google Takeout export. Colors, images, links, checklists, and labels are preserved where possible. Large imports may need a direct LAN/SSH connection if your proxy or CDN limits upload size.
         </p>
 
         <div class="instruction-group">
@@ -38,7 +38,7 @@
               <li>Click <strong>Deselect all</strong>, then scroll down and check only <strong>Keep</strong>.</li>
               <li>Click <strong>Next step</strong>, choose your delivery method (email is easiest), then click <strong>Create export</strong>.</li>
               <li>Google will email you a download link — this usually arrives within a few minutes but can take longer for large exports.</li>
-              <li>Download the ZIP from the email and upload it below.</li>
+              <li>Download the ZIP from the email and upload it below. Kept accepts Takeout ZIPs up to 5 GB by default; for larger self-hosted imports, set <code>KEPT_TAKEOUT_UPLOAD_MAX</code>.</li>
             </ol>
           }
         </div>
@@ -191,6 +191,22 @@
             <input type="checkbox" [checked]="richLinkPreviews" (change)="toggleRichLinkPreviews($event)">
             <span class="toggle-text">{{richLinkPreviews ? 'Enabled' : 'Disabled'}}</span>
           </label>
+        </div>
+
+        <div class="preference-row">
+          <div class="preference-info">
+            <span class="preference-label">Note preview text size and density</span>
+            <span class="preference-desc">Adjust note card text and density in the overview.</span>
+          </div>
+          <div class="segmented-control" role="group" aria-label="Note preview text size">
+            @for (option of notePreviewTextSizeOptions; track option.value) {
+              <button type="button"
+                [class.active]="notePreviewTextSize === option.value"
+                (click)="setNotePreviewTextSize(option.value)">
+                {{option.label}}
+              </button>
+            }
+          </div>
         </div>
       </div>
     </div>

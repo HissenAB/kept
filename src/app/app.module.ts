@@ -1,7 +1,7 @@
 import { NgModule } from '@angular/core';
 import { BrowserModule } from '@angular/platform-browser';
 import { FormsModule } from '@angular/forms';
-import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http';
+import { HTTP_INTERCEPTORS, provideHttpClient, withInterceptorsFromDi } from '@angular/common/http';
 import { AppComponent } from './app.component';
 import { MainComponent } from './components/main/main.component';
 import { NavComponent } from './components/sidenav/sidenav.component';
@@ -22,6 +22,7 @@ import { ReminderNotificationComponent } from './components/reminder/reminder-no
 import { LinkPreviewComponent } from './components/link-preview/link-preview.component';
 import { UpdateBannerComponent } from './components/update-banner/update-banner.component';
 import { MergeDialogComponent } from './components/merge-dialog/merge-dialog.component';
+import { AuthExpiredInterceptor } from './services/auth-expired.interceptor';
 
 @NgModule({ declarations: [
         AppComponent,
@@ -46,5 +47,8 @@ import { MergeDialogComponent } from './components/merge-dialog/merge-dialog.com
     ],
     bootstrap: [AppComponent], imports: [BrowserModule,
         FormsModule,
-        AppRoutingModule], providers: [provideHttpClient(withInterceptorsFromDi())] })
+        AppRoutingModule], providers: [
+        { provide: HTTP_INTERCEPTORS, useClass: AuthExpiredInterceptor, multi: true },
+        provideHttpClient(withInterceptorsFromDi())
+    ] })
 export class AppModule { }
