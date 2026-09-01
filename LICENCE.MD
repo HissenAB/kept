@@ -3,7 +3,7 @@
 SPDX-License-Identifier: AGPL-3.0-only
 
 Copyright (c) 2026 ericerkz (Original Kept software)
-Copyright (c) 2026 Hissen AB (Modifications and extensions)
+Copyright (c) 2026 HissenAB (Modifications and extensions)
 
 This project is a modified version of Kept.
 
