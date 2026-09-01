@@ -1,5 +1,6 @@
 import { NoteI, CheckboxI, NoteImageI, NoteAttachmentI } from '../../interfaces/notes';
 import { Component, OnInit, ViewChild, ElementRef, ChangeDetectorRef, Input, HostBinding, HostListener } from '@angular/core';
+import { Router } from '@angular/router';
 
 import { bgImages, bgColors } from 'src/app/interfaces/tooltip';
 import { SharedService } from 'src/app/services/shared.service';
@@ -11,14 +12,23 @@ import { ShareUserI } from 'src/app/interfaces/users';
 import { LinkPreviewData, NotesService } from 'src/app/services/notes.service';
 import { PushNotificationService } from 'src/app/services/push-notification.service';
 import { ReminderService } from 'src/app/services/reminder.service';
+import { ReminderRepeatRule, ReminderRepeatType } from 'src/app/interfaces/reminder';
+import { KeptPluginsService, type ResolvedLocation } from 'src/app/services/kept-plugins.service';
+import { LocationSavedPlacesService, type LocationSavedPlace, type LocationTrigger, type SavedPlaceType } from 'src/app/services/location-saved-places.service';
 import { NgZone } from '@angular/core';
 import { TimepickerUI, type ConfirmEventData } from 'timepicker-ui';
+import { isNativePhonePlatform, shouldUseFullscreenNoteEditor } from 'src/app/utils/platform';
+import { NoteLockService } from 'src/app/services/note-lock.service';
+import { UserPreferencesService } from 'src/app/services/user-preferences.service';
+import { ensureTimepickerWheelPlugin } from 'src/app/utils/timepicker-wheel';
 
 declare var Snackbar: any;
 type InputLengthI = { title?: number, body?: number, cb?: number }
 type DrawingTool = 'select' | 'pen' | 'marker' | 'highlighter' | 'eraser'
 type DrawingPoint = { x: number, y: number }
 type DrawingSelection = { x: number, y: number, w: number, h: number }
+type PlaceDialogView = 'choose' | 'manage' | 'add' | 'search'
+type PlaceListItem = LocationSavedPlace | { id: 'home-prompt' | 'work-prompt'; name: string; address: string; placeType: SavedPlaceType; prompt: true }
 @Component({
     selector: 'app-input',
     templateUrl: './input.component.html',
@@ -29,8 +39,9 @@ export class InputComponent implements OnInit {
   @HostBinding('class.mobile-active') get isMobileActive() {
     return this.mobileComposeMode;
   }
+  @HostBinding('class.native-phone-layout') readonly nativePhoneLayout = isNativePhonePlatform();
 
-  constructor(private cd: ChangeDetectorRef, public Shared: SharedService, public auth: AuthService, private notesService: NotesService, private push: PushNotificationService, private reminderService: ReminderService, private zone: NgZone) { }
+  constructor(private cd: ChangeDetectorRef, public Shared: SharedService, public auth: AuthService, private notesService: NotesService, private push: PushNotificationService, private reminderService: ReminderService, public keptPlugins: KeptPluginsService, private savedPlacesService: LocationSavedPlacesService, private zone: NgZone, private router: Router, public noteLock: NoteLockService, public preferences: UserPreferencesService) { }
 
   @ViewChild("main") main!: ElementRef<HTMLDivElement>
   //? Placeholder  ----------------------------------------------------
@@ -67,10 +78,18 @@ export class InputComponent implements OnInit {
   ].join(',')
   labels: LabelI[] = []
   private labelsDirty = false
+  binderName = ''
+  binderMenuError = ''
   isArchived = false
   isTrashed = false
   isCboxCompletedListCollapsed = false
   showTextFormatting = false
+  private textHistoryTarget?: HTMLElement
+  private cboxHistory: CheckboxI[][] = []
+  private cboxHistoryIndex = -1
+  private lastCboxStructuralChangeAt = 0
+  private lastCboxTextInputAt = 0
+  private cboxHistoryRedoMode = false
   isCbox = new BehaviorSubject<boolean>(false)
   inputLength = new BehaviorSubject<InputLengthI>({ title: 0, body: 0, cb: 0 })
   collaboratorUsers: ShareUserI[] = []
@@ -86,7 +105,52 @@ export class InputComponent implements OnInit {
   customTimePicker: any
   customTimePickerInput?: HTMLInputElement
   pendingReminderDate: Date | null = null
+  pendingReminderRepeatRule: ReminderRepeatRule | null = null
+  pendingReminderLocation: { locationName: string; latitude: number; longitude: number; radiusMeters: number; timezone: string; locationTrigger: LocationTrigger } | null = null
+  reminderRepeatType: ReminderRepeatType = 'none'
+  reminderRepeatCustomDays = 2
+  reminderMoveToTopOnTrigger = false
+  readonly reminderRepeatOptions: Array<{ value: ReminderRepeatType; label: string }> = [
+    { value: 'none', label: 'None' },
+    { value: 'daily', label: 'Daily' },
+    { value: 'weekly', label: 'Weekly' },
+    { value: 'monthly', label: 'Monthly' },
+    { value: 'custom_days', label: '...' }
+  ]
+  showReminderTypeDialog = false
   showReminderDateDialog = false
+  showReminderLocationDialog = false
+  placeDialogView: PlaceDialogView = 'choose'
+  locationState: 'idle' | 'resolved' | 'ambiguous' | 'permission' | 'notFound' = 'idle'
+  locationPhrase = ''
+  resolvedLocation: ResolvedLocation | null = null
+  locationMapPreview = ''
+  candidates: ResolvedLocation[] = []
+  resolving = false
+  permissionReason = ''
+  showAndroidBackgroundLocationEducation = false
+  androidLocationEducationMode: 'foreground' | 'background' = 'background'
+  androidBackgroundLocationMessage = ''
+  savedPlaces: LocationSavedPlace[] = []
+  savedPlacesLoading = false
+  savedPlacesError = ''
+  savedPlacesSearch = ''
+  locationTrigger: LocationTrigger = 'arrive'
+  addPlaceName = ''
+  addPlaceType: SavedPlaceType = 'other'
+  addPlaceRadiusMeters = 100
+  addPlaceSaving = false
+  swipingPlaceId: number | null = null
+  readonly savedPlaceTypes: SavedPlaceType[] = ['home', 'work', 'gym', 'other']
+  readonly savedPlaceRadii = [100, 250, 500, 1000]
+  currentLocation: { latitude: number; longitude: number } | null = null
+  currentLocationLoading = false
+  private placeSwipeStartPoint?: { id: number; x: number; y: number }
+  private pendingAndroidLocationReminder: { location: ResolvedLocation; trigger: LocationTrigger } | null = null
+  private pendingAndroidLocationSearch: { view: PlaceDialogView } | null = null
+  private androidBackgroundLocationResumeHandler?: () => void
+  private androidBackgroundLocationFocusHandler?: () => void
+  private androidBackgroundLocationResumeRunning = false
   collaboratorError = ''
   isSavingCollaborators = false
   labelMenuError = ''
@@ -131,6 +195,9 @@ export class InputComponent implements OnInit {
   private cboxTouchIsDone = false;
   private cboxTouchStartX = 0;
   private cboxTouchStartY = 0;
+  private cboxTouchIndentHandled = false;
+  private pendingCboxFocusPoint?: { id: number, x: number, y: number };
+  private cboxTextTouch?: { id: number, x: number, y: number, moved: boolean, wasFocused: boolean, disabledEditing: boolean };
   private lastCboxTouchToggleAt = 0;
   activePointers: Map<number, { x: number, y: number }> = new Map();
   drawingTransform = { scale: 1, x: 0, y: 0 };
@@ -145,6 +212,8 @@ export class InputComponent implements OnInit {
   coEditSubscription?: Subscription;
   notesListSubscription?: Subscription;
   mobileComposerSubscription?: Subscription;
+  closeMobileComposerSubscription?: Subscription;
+  preferencesSubscription?: Subscription;
   private coEditSaveInFlight = false;
   private coEditSaveQueued = false;
   private lastBodyRange?: Range
@@ -203,6 +272,7 @@ export class InputComponent implements OnInit {
     }
     this.labels = JSON.parse(JSON.stringify(this.Shared.label.list))
     this.labelsDirty = false
+    this.binderName = this.isEditing ? (this.noteToEdit.binder || '') : this.currentRouteBinder()
     /*
     the correct way is to use `mousedown` because : 
     https://www.javascripttutorial.net/javascript-dom/javascript-mouse-events/
@@ -235,7 +305,8 @@ export class InputComponent implements OnInit {
     }
 
     // Otherwise, save and close
-    await this.saveNote()
+    const saved = await this.saveNote()
+    if (saved === false) return
     this.closeNote()
   }
 
@@ -303,6 +374,10 @@ export class InputComponent implements OnInit {
     return this.isHybridNote;
   }
 
+  canFormatText(): boolean {
+    return !this.isCbox.value || this.hasHybridBody()
+  }
+
   private hasMeaningfulBody(value?: string | null) {
     const div = document.createElement('div')
     div.innerHTML = value || ''
@@ -331,24 +406,13 @@ export class InputComponent implements OnInit {
 
   //? note  -----------------------------------------------------
 
-  async saveNote(closeAfterSave = true) {
-    this.cboxInput?.nativeElement.blur()
+  async saveNote(closeAfterSave = true): Promise<boolean | void> {
+    if (closeAfterSave) this.cboxInput?.nativeElement.blur()
     if (this.isDrawingNote) this.syncDrawingImage()
     if (this.isCbox.value && this.cboxPh?.nativeElement.innerHTML.trim()) {
       this.addCheckBoxFromPlaceholder()
     }
-    const allCboxElements = this.noteContainer.nativeElement.querySelectorAll('[data-cbox-id]')
-    allCboxElements.forEach((el: Element) => {
-      const cboxEl = el as HTMLDivElement
-      const idAttr = cboxEl.getAttribute('data-cbox-id')
-      if (idAttr) {
-        const id = Number(idAttr)
-        const cb = this.checkBoxes.find(c => c.id === id)
-        if (cb) {
-          cb.data = cboxEl.innerHTML
-        }
-      }
-    })
+    const checkBoxesForSave = this.currentCheckBoxesForSave(closeAfterSave)
     const labelsForSave = await this.labelsForSave()
     let noteObj: NoteI = {
       noteTitle: this.noteTitle.nativeElement.innerHTML,
@@ -356,17 +420,20 @@ export class InputComponent implements OnInit {
       pinned: this.notePin.nativeElement.dataset['pinned'] === "true", // converting string to bool,
       bgColor: this.noteMain.nativeElement.style.backgroundColor,
       bgImage: this.noteMain.nativeElement.style.backgroundImage || this.noteContainer.nativeElement.style.backgroundImage,
-      checkBoxes: this.checkBoxes,
+      checkBoxes: checkBoxesForSave,
       images: this.images.map(image => ({ ...image, dataUrl: this.auth.canonicalImageUrl(image.dataUrl) })),
       isCbox: this.isCbox.value,
       labels: labelsForSave,
+      binder: this.binderName,
       archived: this.isArchived,
       trashed: this.isTrashed
     }
-    const hasContent = !!(noteObj.noteTitle.length || noteObj.noteBody && noteObj.noteBody?.length || this.checkBoxes.length || this.images.length || this.attachments.length || this.pendingAttachmentFiles.length || this.isDrawingNote)
+    const hasContent = !!(noteObj.noteTitle.length || noteObj.noteBody && noteObj.noteBody?.length || checkBoxesForSave.length || this.images.length || this.attachments.length || this.pendingAttachmentFiles.length || this.isDrawingNote)
 
     if (this.isEditing) {
-      if (!this.noteChangedForSave(noteObj)) {
+      const noteChanged = this.noteChangedForSave(noteObj)
+      const hasPendingReminderSave = !!(this.pendingReminderDate || this.pendingReminderLocation)
+      if (!noteChanged && !hasPendingReminderSave) {
         if (closeAfterSave) this.Shared.closeModal.next(true)
         return
       }
@@ -380,6 +447,10 @@ export class InputComponent implements OnInit {
           await this.notesService.update(noteObj, this.noteToEdit.id!)
           this.saveBaselineSnapshot = this.noteSaveSnapshot(noteObj)
           this.labelsDirty = false
+          this.flushPendingReminderSaves(this.noteToEdit.id!, noteObj)
+        } catch (error) {
+          if (this.auth.isAuthExpiredError(error)) return false
+          throw error
         } finally {
           this.coEditSaveInFlight = false
           if (this.coEditSaveQueued) {
@@ -388,29 +459,35 @@ export class InputComponent implements OnInit {
           }
         }
       } else {
-        await this.notesService.update(noteObj, this.noteToEdit.id!)
+        try {
+          await this.notesService.update(noteObj, this.noteToEdit.id!)
+        } catch (error) {
+          if (this.auth.isAuthExpiredError(error)) return false
+          throw error
+        }
         this.saveBaselineSnapshot = this.noteSaveSnapshot(noteObj)
         this.labelsDirty = false
         this.updateLastEditedTime();
+        this.flushPendingReminderSaves(this.noteToEdit.id!, noteObj)
       }
       if (closeAfterSave) this.Shared.closeModal.next(true)
       return
     }
 
     if (hasContent) {
-        let id = await this.Shared.note.db.add(noteObj)
-        await this.uploadPendingAttachments(id)
-        if (this.pendingReminderDate) {
-          const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
-          await this.reminderService.create({
-            noteId: id,
-            dueAtUtc: this.pendingReminderDate.toISOString(),
-            timezone: tz,
-            title: this.notePlainText(noteObj.noteTitle),
-            body: this.notePlainText(noteObj.noteBody)
-          })
-          this.pendingReminderDate = null
+        let id: number
+        try {
+          id = await this.Shared.note.db.add(noteObj)
+        } catch (error) {
+          if (this.auth.isAuthExpiredError(error)) return false
+          throw error
         }
+        if (!id || id === -1) {
+          if (closeAfterSave) this.showNoteSaveError()
+          return false
+        }
+        await this.uploadPendingAttachments(id)
+        this.flushPendingReminderSaves(id, noteObj)
         if (this.isArchived) {
           this.Shared.snackBar({ action: 'archived', opposite: 'unarchived' }, { archived: false }, id)
         }
@@ -421,11 +498,69 @@ export class InputComponent implements OnInit {
     }
   }
 
+  private currentCheckBoxesForSave(updateModel: boolean) {
+    const next = this.normalizeCheckBoxes(this.checkBoxes)
+    const allCboxElements = this.noteContainer.nativeElement.querySelectorAll('[data-cbox-id]')
+    allCboxElements.forEach((el: Element) => {
+      const cboxEl = el as HTMLDivElement
+      const idAttr = cboxEl.getAttribute('data-cbox-id')
+      if (!idAttr) return
+      const id = Number(idAttr)
+      const cb = next.find(c => c.id === id)
+      if (cb) cb.data = cboxEl.innerHTML
+    })
+    if (updateModel) this.checkBoxes = next
+    return next
+  }
+
   private noteChangedForSave(noteObj: NoteI) {
     if (!this.isEditing || !this.noteToEdit?.id) return true
     if (this.pendingAttachmentFiles.length) return true
     const baseline = this.saveBaselineSnapshot ?? this.noteSaveSnapshot(this.noteToEdit)
     return this.noteSaveSnapshot(noteObj) !== baseline
+  }
+
+  private flushPendingReminderSaves(noteId: number, noteObj: NoteI) {
+    if (!noteId || noteId === -1) return
+    const title = this.notePlainText(noteObj.noteTitle)
+    const body = this.notePlainText(noteObj.noteBody)
+
+    // Reminder saves are fire-and-forget and only run after the note itself
+    // has been persisted, so native clients see a real noteId in the request.
+    if (this.pendingReminderDate) {
+      const reminderDate = this.pendingReminderDate
+      const repeatRule = this.pendingReminderRepeatRule
+      this.pendingReminderDate = null
+      this.pendingReminderRepeatRule = null
+      this.reminderService.create({
+        noteId,
+        dueAtUtc: reminderDate.toISOString(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        repeatRule,
+        title,
+        body
+      }).then(result => {
+        if (!result) this.showReminderSaveError()
+      }).catch(() => this.showReminderSaveError())
+    }
+
+    if (this.pendingReminderLocation) {
+      const location = this.pendingReminderLocation
+      this.pendingReminderLocation = null
+      this.reminderService.create({
+        noteId,
+        locationName: location.locationName,
+        latitude: location.latitude,
+        longitude: location.longitude,
+        radiusMeters: location.radiusMeters,
+        locationTrigger: location.locationTrigger,
+        timezone: location.timezone,
+        title,
+        body
+      }).then(result => {
+        if (!result) this.showReminderSaveError()
+      }).catch(() => this.showReminderSaveError())
+    }
   }
 
   private noteSaveSnapshot(note: NoteI) {
@@ -439,6 +574,7 @@ export class InputComponent implements OnInit {
       images: this.normalizeImages(note.images || []),
       isCbox: !!note.isCbox,
       labels: this.normalizeLabels(note.labels || []),
+      binder: note.binder || '',
       archived: !!note.archived,
       trashed: !!note.trashed
     })
@@ -472,11 +608,181 @@ export class InputComponent implements OnInit {
   }
 
   private normalizeCheckBoxes(checkBoxes: CheckboxI[] = []) {
+    const numericIds = checkBoxes
+      .map(item => Number((item as any)?.id))
+      .filter(id => Number.isSafeInteger(id) && id >= 0)
+    let nextId = numericIds.length ? Math.max(...numericIds) + 1 : 0
+    const usedIds = new Set<number>()
+    const nextAvailableId = () => {
+      while (usedIds.has(nextId)) nextId++
+      return nextId++
+    }
+
     return checkBoxes.map(item => ({
-      id: item.id,
+      id: (() => {
+        const numericId = Number((item as any)?.id)
+        if (Number.isSafeInteger(numericId) && numericId >= 0 && !usedIds.has(numericId)) {
+          usedIds.add(numericId)
+          return numericId
+        }
+        const id = nextAvailableId()
+        usedIds.add(id)
+        return id
+      })(),
       done: !!item.done,
-      data: item.data || ''
+      data: item.data || '',
+      indentLevel: this.normalizedCboxIndentLevel(item.indentLevel)
     }))
+  }
+
+  checkboxIndentLevel(cb?: CheckboxI) {
+    return this.normalizedCboxIndentLevel(cb?.indentLevel)
+  }
+
+  checkboxIndentPx(cb?: CheckboxI) {
+    return this.checkboxIndentLevel(cb) * 32
+  }
+
+  checklistRowsForSection(isDone: boolean) {
+    return this.preferences.value.moveCompletedChecklistItemsToBottom
+      ? this.checkBoxes.filter(cb => cb.done === isDone)
+      : (isDone ? [] : this.checkBoxes)
+  }
+
+  completedChecklistCount() {
+    return this.checkBoxes.filter(cb => cb.done).length
+  }
+
+  private cboxSectionMatches(cb: CheckboxI, isDone: boolean) {
+    return !this.preferences.value.moveCompletedChecklistItemsToBottom || cb.done === isDone
+  }
+
+  private normalizedCboxIndentLevel(value: unknown) {
+    return Number(value) === 1 ? 1 : 0
+  }
+
+  private canIndentCboxAt(index: number) {
+    if (index <= 0) return false
+    return this.checkBoxes.slice(0, index).some(cb => this.checkboxIndentLevel(cb) === 0)
+  }
+
+  private setCboxIndentLevel(id: number, indentLevel: number, options: { commit?: boolean } = {}) {
+    this.syncCboxDomIntoModel()
+    const index = this.checkBoxes.findIndex(cb => cb.id === id)
+    if (index < 0) return false
+
+    const nextIndent = this.normalizedCboxIndentLevel(indentLevel)
+    if (nextIndent === 1 && !this.canIndentCboxAt(index)) return false
+    if (this.checkboxIndentLevel(this.checkBoxes[index]) === nextIndent) return false
+
+    this.checkBoxes[index] = { ...this.checkBoxes[index], indentLevel: nextIndent }
+    this.checkBoxes = [...this.checkBoxes]
+    this.noteToEdit.checkBoxes = this.checkBoxes
+    this.cd.detectChanges()
+
+    if (options.commit !== false) {
+      this.pushCboxHistorySnapshot()
+      this.queueCoEditAutosave()
+    }
+    return true
+  }
+
+  private childIndexesForParent(index: number) {
+    if (index < 0 || this.checkboxIndentLevel(this.checkBoxes[index]) !== 0) return []
+    const indexes: number[] = []
+    for (let i = index + 1; i < this.checkBoxes.length; i++) {
+      if (this.checkboxIndentLevel(this.checkBoxes[i]) === 0) break
+      indexes.push(i)
+    }
+    return indexes
+  }
+
+  private toggleCboxDoneWithChildren(id: number) {
+    this.syncCboxDomIntoModel()
+    const index = this.checkBoxes.findIndex(x => x.id === id)
+    if (index < 0) return false
+
+    const done = !this.checkBoxes[index].done
+    this.checkBoxes[index].done = done
+    for (const childIndex of this.childIndexesForParent(index)) {
+      this.checkBoxes[childIndex].done = done
+    }
+    this.checkBoxes = [...this.checkBoxes]
+    return true
+  }
+
+  private applyCboxIndentFromTouch(rawDx: number, rawDy: number) {
+    if (this.draggedCboxId === undefined) return false
+    const absDx = Math.abs(rawDx)
+    const absDy = Math.abs(rawDy)
+    if (absDx < 42 || absDx < absDy * 1.15) return false
+
+    if (!this.cboxTouchIndentHandled) {
+      const dragged = this.checkBoxes.find(cb => cb.id === this.draggedCboxId)
+      const currentIndent = this.checkboxIndentLevel(dragged)
+      const nextIndent = rawDx > 0
+        ? (currentIndent === 1 ? 0 : 1)
+        : currentIndent
+      const changed = this.setCboxIndentLevel(this.draggedCboxId, nextIndent, { commit: false })
+      if (changed) {
+        this.cboxDragOrderChanged = true
+        try { (navigator as any).vibrate?.(8) } catch {}
+      }
+      this.cboxTouchIndentHandled = true
+    }
+    return true
+  }
+
+  private cloneCheckBoxes(checkBoxes: CheckboxI[] = []) {
+    return this.normalizeCheckBoxes(checkBoxes)
+  }
+
+  private resetCboxHistory() {
+    this.cboxHistory = [this.cloneCheckBoxes(this.checkBoxes)]
+    this.cboxHistoryIndex = 0
+    this.lastCboxStructuralChangeAt = 0
+    this.lastCboxTextInputAt = 0
+    this.cboxHistoryRedoMode = false
+  }
+
+  private syncCboxDomIntoModel() {
+    this.checkBoxes = this.currentCheckBoxesForSave(false)
+  }
+
+  private pushCboxHistorySnapshot() {
+    const snapshot = this.cloneCheckBoxes(this.currentCheckBoxesForSave(false))
+    const previous = this.cboxHistory[this.cboxHistoryIndex]
+    if (previous && JSON.stringify(previous) === JSON.stringify(snapshot)) return
+    this.cboxHistory = this.cboxHistory.slice(0, this.cboxHistoryIndex + 1)
+    this.cboxHistory.push(snapshot)
+    if (this.cboxHistory.length > 80) this.cboxHistory.shift()
+    this.cboxHistoryIndex = this.cboxHistory.length - 1
+    this.lastCboxStructuralChangeAt = Date.now()
+    this.cboxHistoryRedoMode = true
+  }
+
+  private canStepCboxHistory(command: 'undo' | 'redo') {
+    return command === 'undo'
+      ? this.cboxHistoryIndex > 0
+      : this.cboxHistoryIndex >= 0 && this.cboxHistoryIndex < this.cboxHistory.length - 1
+  }
+
+  private shouldUseCboxHistory(command: 'undo' | 'redo') {
+    if (!this.isCbox.value) return false
+    if (!this.canStepCboxHistory(command)) return false
+    if (command === 'redo') return this.cboxHistoryRedoMode
+    return this.lastCboxStructuralChangeAt >= this.lastCboxTextInputAt
+  }
+
+  private stepCboxHistory(command: 'undo' | 'redo') {
+    if (!this.canStepCboxHistory(command)) return
+    this.cboxHistoryIndex += command === 'undo' ? -1 : 1
+    this.checkBoxes = this.cloneCheckBoxes(this.cboxHistory[this.cboxHistoryIndex])
+    this.noteToEdit.checkBoxes = this.checkBoxes
+    this.inputLength.next({ ...this.inputLength.value, cb: this.checkBoxes.length })
+    this.cboxHistoryRedoMode = this.canStepCboxHistory('redo')
+    this.cd.detectChanges()
+    this.queueCoEditAutosave()
   }
 
   private notePlainText(value?: string | null) {
@@ -497,6 +803,7 @@ export class InputComponent implements OnInit {
     this.hasBackgroundImage = false
     //
     this.checkBoxes = []
+    this.resetCboxHistory()
     this.images = []
     this.attachments = []
     this.pendingAttachmentFiles = []
@@ -994,15 +1301,21 @@ export class InputComponent implements OnInit {
   }
 
   addCheckBox(data: string, insertAfterId?: number) {
-    const maxId = this.checkBoxes.reduce((m, c) => Math.max(m, c.id ?? 0), -1)
+    this.syncCboxDomIntoModel()
+    const numericIds = this.checkBoxes
+      .map(c => Number(c.id))
+      .filter(id => Number.isSafeInteger(id) && id >= 0)
+    const maxId = numericIds.length ? Math.max(...numericIds) : -1
     const cb = {
       done: false,
       data: data,
-      id: maxId + 1
+      id: maxId + 1,
+      indentLevel: 0
     }
     if (insertAfterId !== undefined) {
       const idx = this.checkBoxes.findIndex(item => item.id === insertAfterId)
       if (idx >= 0) {
+        cb.indentLevel = this.checkboxIndentLevel(this.checkBoxes[idx])
         this.checkBoxes.splice(idx + 1, 0, cb)
       } else {
         this.checkBoxes.push(cb)
@@ -1011,6 +1324,7 @@ export class InputComponent implements OnInit {
       this.checkBoxes.push(cb)
     }
     this.inputLength.next({ ...this.inputLength.value, cb: this.checkBoxes.length })
+    this.pushCboxHistorySnapshot()
     this.queueCoEditAutosave()
     return cb
   }
@@ -1023,7 +1337,15 @@ export class InputComponent implements OnInit {
 
   cboxInputFocus(event: FocusEvent) {
     const el = event.target as HTMLDivElement
+    this.rememberTextHistoryTarget(el)
     setTimeout(() => {
+      const id = Number(el.dataset['cboxId'])
+      const pending = this.pendingCboxFocusPoint
+      if (pending && pending.id === id) {
+        this.pendingCboxFocusPoint = undefined
+        this.placeCboxCaretAtPoint(el, pending.x, pending.y)
+        return
+      }
       const range = document.createRange()
       const sel = window.getSelection()
       range.selectNodeContents(el)
@@ -1033,8 +1355,108 @@ export class InputComponent implements OnInit {
     }, 0)
   }
 
+  cboxTextTouchStart(event: TouchEvent, id: number, el: HTMLDivElement) {
+    const touch = event.touches[0]
+    if (!touch) return
+    const wasFocused = document.activeElement === el
+    if (!wasFocused) el.contentEditable = 'false'
+    this.cboxTextTouch = {
+      id,
+      x: touch.clientX,
+      y: touch.clientY,
+      moved: false,
+      wasFocused,
+      disabledEditing: !wasFocused
+    }
+  }
+
+  cboxTextTouchMove(event: TouchEvent, id: number, el: HTMLDivElement) {
+    const touch = event.touches[0]
+    const start = this.cboxTextTouch
+    if (!touch || !start || start.id !== id) return
+    const dx = Math.abs(touch.clientX - start.x)
+    const dy = Math.abs(touch.clientY - start.y)
+    if (dx <= 10 && dy <= 10) return
+
+    start.moved = true
+    this.pendingCboxFocusPoint = undefined
+    if (!start.wasFocused && document.activeElement === el) el.blur()
+  }
+
+  cboxTextTouchCancel(id: number, el: HTMLDivElement) {
+    if (this.cboxTextTouch?.id === id) {
+      if (this.cboxTextTouch.disabledEditing) el.contentEditable = 'true'
+      this.cboxTextTouch = undefined
+    }
+  }
+
+  focusCboxFromTouch(event: TouchEvent, id: number, el: HTMLDivElement) {
+    const touch = event.changedTouches[0]
+    if (!touch) return
+    const start = this.cboxTextTouch
+    this.cboxTextTouch = undefined
+    if (!start || start.id !== id) return
+    if (start.disabledEditing) el.contentEditable = 'true'
+    const dx = Math.abs(touch.clientX - start.x)
+    const dy = Math.abs(touch.clientY - start.y)
+    if (start.moved || dx > 10 || dy > 10) {
+      this.pendingCboxFocusPoint = undefined
+      if (!start.wasFocused && document.activeElement === el) el.blur()
+      return
+    }
+
+    this.pendingCboxFocusPoint = { id, x: touch.clientX, y: touch.clientY }
+    if (document.activeElement !== el) {
+      el.focus({ preventScroll: true })
+    }
+    requestAnimationFrame(() => {
+      const pending = this.pendingCboxFocusPoint
+      if (pending && pending.id === id && document.activeElement === el) {
+        this.pendingCboxFocusPoint = undefined
+        this.placeCboxCaretAtPoint(el, pending.x, pending.y)
+      }
+    })
+  }
+
+  private placeCboxCaretAtPoint(el: HTMLDivElement, x: number, y: number) {
+    const doc = document as Document & {
+      caretRangeFromPoint?: (x: number, y: number) => Range | null,
+      caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node, offset: number } | null
+    }
+    let range = doc.caretRangeFromPoint?.(x, y) || null
+    if (!range) {
+      const position = doc.caretPositionFromPoint?.(x, y)
+      if (position) {
+        range = document.createRange()
+        range.setStart(position.offsetNode, position.offset)
+      }
+    }
+    if (!range || !el.contains(range.commonAncestorContainer)) {
+      range = document.createRange()
+      range.selectNodeContents(el)
+      range.collapse(false)
+    } else {
+      range.collapse(true)
+    }
+    const sel = window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+  }
+
+  onCboxInput(id: number) {
+    if (!this.checkBoxes.some(item => item.id === id)) return
+    this.lastCboxTextInputAt = Date.now()
+    this.cboxHistoryRedoMode = false
+    this.queueCoEditAutosave()
+  }
+
   cBoxKeyDown($event: KeyboardEvent, id: number) {
     let target = $event.target as HTMLDivElement
+    if ($event.key === 'Tab') {
+      $event.preventDefault()
+      this.setCboxIndentLevel(id, $event.shiftKey ? 0 : 1)
+      return
+    }
     if ($event.key === 'Enter') {
       $event.preventDefault()
       // Insert the new row immediately after the row Enter was hit in,
@@ -1079,6 +1501,7 @@ export class InputComponent implements OnInit {
   }
 
   cboxDragStart(id: number, event: DragEvent) {
+    this.syncCboxDomIntoModel()
     this.draggedCboxId = id
     this.cboxDragOrderChanged = false
     if (event.dataTransfer) {
@@ -1102,8 +1525,17 @@ export class InputComponent implements OnInit {
   }
 
   private queueCoEditAutosave() {
-    if (!this.isEditing || !this.noteToEdit.id || this.activeEditors.length === 0) return
+    if (!this.isEditing || !this.noteToEdit.id || !this.isSharedEditingNote()) return
     this.autoSaveSubject.next()
+  }
+
+  private isSharedEditingNote() {
+    const me = this.auth.currentUser?.id
+    return !!(
+      this.activeEditors.length ||
+      (this.noteToEdit.ownerUserId && me && this.noteToEdit.ownerUserId !== me) ||
+      this.noteToEdit.collaborators?.length
+    )
   }
 
   private extractUrlsFromHtml(html: string) {
@@ -1124,6 +1556,7 @@ export class InputComponent implements OnInit {
   }
 
   private decorateLinksForEditor(html: string) {
+    if (!this.preferences.value.richLinkPreviews) return this.auth.authenticatedImageHtml(html || '')
     const div = document.createElement('div')
     div.innerHTML = this.auth.authenticatedImageHtml(html || '')
     this.removePreviewMarkup(div)
@@ -1218,6 +1651,7 @@ export class InputComponent implements OnInit {
   }
 
   private hydrateEditorLinkPreviews() {
+    if (!this.preferences.value.richLinkPreviews) return
     const body = this.noteBody?.nativeElement
     if (!body || this.destroyed) return
     const generation = this.editorPreviewGeneration
@@ -1357,6 +1791,46 @@ export class InputComponent implements OnInit {
   toggleTextFormatting(event: Event) {
     event.stopPropagation()
     this.showTextFormatting = !this.showTextFormatting
+  }
+
+  rememberTextHistoryTarget(target?: HTMLElement | null) {
+    if (!target?.isContentEditable) return
+    this.textHistoryTarget = target
+  }
+
+  runTextHistory(command: 'undo' | 'redo', event: Event) {
+    event.preventDefault()
+    event.stopPropagation()
+
+    if (this.shouldUseCboxHistory(command)) {
+      this.stepCboxHistory(command)
+      return
+    }
+
+    const target = this.activeTextHistoryTarget()
+    target?.focus({ preventScroll: true })
+    document.execCommand(command)
+    this.scheduleTextHistoryRefresh()
+  }
+
+  private activeTextHistoryTarget() {
+    const active = document.activeElement as HTMLElement | null
+    if (active?.isContentEditable) {
+      this.textHistoryTarget = active
+      return active
+    }
+    if (this.textHistoryTarget?.isConnected) return this.textHistoryTarget
+    return this.noteBody?.nativeElement || this.noteTitle?.nativeElement
+  }
+
+  private scheduleTextHistoryRefresh() {
+    setTimeout(() => {
+      this.updateInputLength({
+        title: this.noteTitle?.nativeElement.innerHTML.length || 0,
+        body: this.noteBody?.nativeElement.innerHTML.length || 0
+      })
+      this.queueCoEditAutosave()
+    }, 0)
   }
 
   applyTextFormat(command: 'h1' | 'h2' | 'body' | 'bold' | 'italic' | 'underline' | 'clear', event: Event) {
@@ -1980,7 +2454,7 @@ export class InputComponent implements OnInit {
   cboxDragOver(id: number, isDone: boolean, event: DragEvent) {
     if (this.draggedCboxId === undefined) return
     const draggedCb = this.checkBoxes.find(cb => cb.id === this.draggedCboxId)
-    if (!draggedCb || draggedCb.done !== isDone) return
+    if (!draggedCb || !this.cboxSectionMatches(draggedCb, isDone)) return
     event.preventDefault()
     event.stopPropagation()
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
@@ -1997,6 +2471,7 @@ export class InputComponent implements OnInit {
     this.cboxTouchStartY = touch.clientY
     this.cboxTouchIsDone = isDone
     this.cboxTouchDragging = false
+    this.cboxTouchIndentHandled = false
     this.cboxDragOrderChanged = false
     if (this.cboxTouchTimer) clearTimeout(this.cboxTouchTimer)
     this.cboxTouchTimer = setTimeout(() => {
@@ -2015,8 +2490,10 @@ export class InputComponent implements OnInit {
   cboxTouchMove(event: TouchEvent) {
     const touch = event.touches[0]
     if (!touch) return
-    const dx = Math.abs(touch.clientX - this.cboxTouchStartX)
-    const dy = Math.abs(touch.clientY - this.cboxTouchStartY)
+    const rawDx = touch.clientX - this.cboxTouchStartX
+    const rawDy = touch.clientY - this.cboxTouchStartY
+    const dx = Math.abs(rawDx)
+    const dy = Math.abs(rawDy)
 
     if (!this.cboxTouchDragging) {
       if ((dx > 14 || dy > 14) && this.cboxTouchTimer) {
@@ -2029,6 +2506,7 @@ export class InputComponent implements OnInit {
     event.preventDefault()
     event.stopPropagation()
     this.moveCboxDragImageToPoint(touch.clientX, touch.clientY)
+    if (this.applyCboxIndentFromTouch(rawDx, rawDy)) return
     const row = document.elementFromPoint(touch.clientX, touch.clientY)?.closest('[data-cbox-row-id]') as HTMLElement | null
     const id = Number(row?.dataset['cboxRowId'])
     if (Number.isNaN(id)) return
@@ -2048,7 +2526,7 @@ export class InputComponent implements OnInit {
   private reorderCboxAround(id: number, isDone: boolean, clientY: number) {
     if (this.draggedCboxId === undefined) return
     const draggedCb = this.checkBoxes.find(cb => cb.id === this.draggedCboxId)
-    if (!draggedCb || draggedCb.done !== isDone) return
+    if (!draggedCb || !this.cboxSectionMatches(draggedCb, isDone)) return
     if (id === this.draggedCboxId) return
 
     const row = document.querySelector<HTMLElement>(`[data-cbox-row-id="${id}"]`)
@@ -2082,7 +2560,7 @@ export class InputComponent implements OnInit {
     event.stopPropagation()
     if (this.draggedCboxId === undefined) return
     const draggedCb = this.checkBoxes.find(cb => cb.id === this.draggedCboxId)
-    if (!draggedCb || draggedCb.done !== isDone) return
+    if (!draggedCb || !this.cboxSectionMatches(draggedCb, isDone)) return
     this.persistCboxDragOrder()
     this.clearCboxDragState()
   }
@@ -2093,7 +2571,9 @@ export class InputComponent implements OnInit {
   }
 
   private persistCboxDragOrder() {
-    if (!this.cboxDragOrderChanged || !this.isEditing || !this.noteToEdit.id) return
+    if (!this.cboxDragOrderChanged) return
+    this.pushCboxHistorySnapshot()
+    if (!this.isEditing || !this.noteToEdit.id) return
     this.noteToEdit.checkBoxes = this.checkBoxes
     this.saveBaselineSnapshot = this.noteSaveSnapshot({ ...this.noteToEdit, checkBoxes: this.checkBoxes })
     this.notesService.updateKey({ checkBoxes: this.checkBoxes }, this.noteToEdit.id)
@@ -2107,6 +2587,7 @@ export class InputComponent implements OnInit {
     this.draggedCboxId = undefined
     this.dragReadyCboxId = undefined
     this.cboxDragOrderChanged = false
+    this.cboxTouchIndentHandled = false
     this.cboxDragImage?.remove()
     this.cboxDragImage = undefined
   }
@@ -2146,7 +2627,7 @@ export class InputComponent implements OnInit {
     document.querySelectorAll<HTMLElement>('[data-cbox-row-id]').forEach(row => {
       const id = Number(row.dataset['cboxRowId'])
       const cb = this.checkBoxes.find(item => item.id === id)
-      if (cb?.done === isDone) rects.set(id, row.getBoundingClientRect())
+      if (cb && this.cboxSectionMatches(cb, isDone)) rects.set(id, row.getBoundingClientRect())
     })
     return rects
   }
@@ -2187,18 +2668,24 @@ export class InputComponent implements OnInit {
   }
 
   cboxTools(id: number) {
-    let i = this.checkBoxes.findIndex(x => x.id === id)
     let actions = {
       remove: () => {
+        this.syncCboxDomIntoModel()
+        const i = this.checkBoxes.findIndex(x => x.id === id)
+        if (i < 0) return
         this.checkBoxes.splice(i, 1)
         this.inputLength.next({ ...this.inputLength.value, cb: this.checkBoxes.length })
+        this.pushCboxHistorySnapshot()
         this.queueCoEditAutosave()
       },
       check: () => {
-        this.checkBoxes[i].done = !this.checkBoxes[i].done
+        if (!this.toggleCboxDoneWithChildren(id)) return
+        this.pushCboxHistorySnapshot()
         this.queueCoEditAutosave()
       },
       update: (el: HTMLDivElement) => {
+        const i = this.checkBoxes.findIndex(x => x.id === id)
+        if (i < 0) return
         let elValue = el?.innerHTML
         this.checkBoxes[i].data = elValue
         this.queueCoEditAutosave()
@@ -2236,7 +2723,8 @@ export class InputComponent implements OnInit {
     this.noteMain.nativeElement.style.backgroundColor = note.bgColor
     this.noteMain.nativeElement.style.borderColor = note.bgColor
     this.updateTextColor(note.bgColor)
-    this.checkBoxes = JSON.parse(JSON.stringify(note.checkBoxes || []))
+    this.checkBoxes = this.normalizeCheckBoxes(note.checkBoxes || [])
+    this.resetCboxHistory()
     // Hybrid: latch BEFORE flipping isCbox so the noteBody ViewChild is
     // present after change detection (otherwise the body assignment below
     // would silently no-op when loading a hybrid note from a checklist-only
@@ -2245,6 +2733,7 @@ export class InputComponent implements OnInit {
     this.isCbox.next(note.isCbox)
     this.isArchived = note.archived
     this.isTrashed = note.trashed
+    this.binderName = note.binder || ''
     this.saveBaselineSnapshot = this.noteSaveSnapshot(note)
     //
     this.inputLength.next({ title: note.noteTitle.length, body: (note.noteBody ? note.noteBody?.length : 0) + this.images.length + this.attachments.length, cb: note.checkBoxes?.length! })
@@ -2298,12 +2787,26 @@ export class InputComponent implements OnInit {
     return this.selectedCollaboratorIds.includes(userId)
   }
 
-  toggleCollaborator(userId: number) {
+  async toggleCollaborator(userId: number) {
     if (!this.canManageCollaborators()) return
+    const previousSelectedIds = [...this.selectedCollaboratorIds]
     if (this.isCollaboratorSelected(userId)) {
       this.selectedCollaboratorIds = this.selectedCollaboratorIds.filter(id => id !== userId)
     } else {
       this.selectedCollaboratorIds = [...this.selectedCollaboratorIds, userId]
+    }
+
+    this.isSavingCollaborators = true
+    this.collaboratorError = ''
+    try {
+      const collaborators = await this.notesService.updateCollaborators(this.noteToEdit.id!, this.selectedCollaboratorIds)
+      this.noteToEdit.collaborators = collaborators
+      this.selectedCollaboratorIds = collaborators.map(user => user.id)
+    } catch (error: any) {
+      this.selectedCollaboratorIds = previousSelectedIds
+      this.collaboratorError = error?.error?.error || 'Could not update collaborators.'
+    } finally {
+      this.isSavingCollaborators = false
     }
   }
 
@@ -2359,6 +2862,35 @@ export class InputComponent implements OnInit {
     this.labelsDirty = true
   }
 
+  async addBinderFromMenu(input: HTMLInputElement) {
+    const name = input.value.trim()
+    if (!name) return
+    const existing = this.Shared.binder.list.find(binder => binder.name.toLowerCase() === name.toLowerCase())
+    if (existing) {
+      this.binderName = existing.name
+      input.value = ''
+      this.binderMenuError = ''
+      return
+    }
+    try {
+      await this.Shared.binder.db.add(name)
+      this.binderName = name
+      input.value = ''
+      this.binderMenuError = ''
+    } catch {
+      this.binderMenuError = 'Could not create binder'
+    }
+  }
+
+  selectBinder(name: string, tooltipEl?: HTMLDivElement) {
+    this.binderName = String(name || '').trim()
+    if (tooltipEl) this.Shared.closeTooltip(tooltipEl)
+  }
+
+  isSelectedBinder(name: string) {
+    return (this.binderName || '') === (name || '')
+  }
+
   isSharedNoteForCurrentUser() {
     const ownerId = this.noteToEdit?.ownerUserId
     const me = this.auth.currentUser?.id
@@ -2398,6 +2930,56 @@ export class InputComponent implements OnInit {
     }
     this.Shared.closeTooltip(tooltipEl)
     return actions
+  }
+
+  async lockCurrentNote(tooltipEl?: HTMLDivElement) {
+    tooltipEl && this.Shared.closeTooltip(tooltipEl)
+    if (!this.isEditing || !this.noteToEdit?.id || this.isSharedNoteForCurrentUser()) return
+    const fields = await this.noteLock.createLockFields()
+    if (!fields) return
+    await this.notesService.updateKey(fields, this.noteToEdit.id)
+    Object.assign(this.noteToEdit, fields)
+    this.noteLock.markUnlocked(this.noteToEdit)
+    this.saveBaselineSnapshot = this.noteSaveSnapshot(this.noteToEdit)
+  }
+
+  async changeCurrentNoteLock(tooltipEl?: HTMLDivElement) {
+    tooltipEl && this.Shared.closeTooltip(tooltipEl)
+    if (!this.isEditing || !this.noteToEdit?.id || this.isSharedNoteForCurrentUser()) return
+    const fields = await this.noteLock.changeLockFields(this.noteToEdit)
+    if (!fields) return
+    await this.notesService.updateKey(fields, this.noteToEdit.id)
+    Object.assign(this.noteToEdit, fields)
+    this.noteLock.markUnlocked(this.noteToEdit)
+    this.saveBaselineSnapshot = this.noteSaveSnapshot(this.noteToEdit)
+  }
+
+  async removeCurrentNoteLock(tooltipEl?: HTMLDivElement) {
+    tooltipEl && this.Shared.closeTooltip(tooltipEl)
+    if (!this.isEditing || !this.noteToEdit?.id || this.isSharedNoteForCurrentUser()) return
+    const fields = await this.noteLock.removeLockFields(this.noteToEdit)
+    if (!fields) return
+    await this.notesService.updateKey(fields, this.noteToEdit.id)
+    Object.assign(this.noteToEdit, fields)
+    this.saveBaselineSnapshot = this.noteSaveSnapshot(this.noteToEdit)
+  }
+
+  relockCurrentNote(tooltipEl?: HTMLDivElement) {
+    tooltipEl && this.Shared.closeTooltip(tooltipEl)
+    if (!this.isEditing || !this.noteToEdit?.id || !this.noteToEdit.locked) return
+    this.noteLock.clearUnlocked(this.noteToEdit)
+    this.Shared.closeModal.next(true)
+  }
+
+  private currentRouteBinder() {
+    const path = this.router.url.split('?')[0].split('#')[0]
+    const match = path.match(/\/binder\/([^/]+)/)
+    if (!match) return ''
+    try {
+      return decodeURIComponent(match[1])
+    } catch {
+      return match[1]
+    }
   }
 
   colorMenu = {
@@ -2472,6 +3054,9 @@ export class InputComponent implements OnInit {
     this.mobileComposerSubscription = this.Shared.openMobileComposer.subscribe(open => {
       if (open) this.openMobileComposer()
     })
+    this.closeMobileComposerSubscription = this.Shared.closeMobileComposer.subscribe(close => {
+      if (close && this.mobileComposeMode && !this.isEditing) this.mobileBack()
+    })
     if (this.isEditing) { this.saveNoteSubscription = this.Shared.saveNote.subscribe(x => { if (x) this.saveNote() }) }
     if (this.isEditing && this.noteToEdit.id) {
       this.notesService.joinNote(this.noteToEdit.id);
@@ -2481,14 +3066,14 @@ export class InputComponent implements OnInit {
         }
       });
       this.autoSaveSubscription = this.autoSaveSubject.pipe(debounceTime(550)).subscribe(() => {
-        if (this.activeEditors.length > 0) {
+        if (this.isSharedEditingNote()) {
           this.saveNote(false);
         }
       });
       this.notesListSubscription = this.notesService.notesList$.subscribe(notes => {
-        if (!notes || this.activeEditors.length === 0) return;
+        if (!notes) return;
         const updatedNote = notes.find(n => n.id === this.noteToEdit.id);
-        if (updatedNote) {
+        if (updatedNote && updatedNote.lastEditorUserId !== this.auth.currentUser?.id) {
           this.applyExternalUpdate(updatedNote);
         }
       });
@@ -2518,12 +3103,18 @@ export class InputComponent implements OnInit {
   ngOnInit(): void {
     if (this.isEditing && this.noteToEdit) {
       this.updateLastEditedTime();
-      if (window.innerWidth < 660) {
+      if (shouldUseFullscreenNoteEditor()) {
         this.mobileComposeMode = true;
         this.lockBodyScroll();
       }
     }
     this.bindKeyboardOffset();
+    this.preferencesSubscription = this.preferences.preferences$.subscribe(() => {
+      this.updateLastEditedTime();
+      this.destroyTimePicker();
+      this.decorateCurrentBodyLinks();
+      this.cd.detectChanges();
+    });
   }
 
   // Prevent the document body from rubber-banding/scrolling underneath the
@@ -2585,7 +3176,11 @@ export class InputComponent implements OnInit {
     
     let timeStr = '';
     if (isToday) {
-      timeStr = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      timeStr = date.toLocaleTimeString([], {
+        hour: this.preferences.value.useTwentyFourHourTime ? '2-digit' : 'numeric',
+        minute: '2-digit',
+        hour12: this.preferences.value.useTwentyFourHourTime ? false : undefined
+      });
     } else {
       timeStr = date.toLocaleDateString([], { month: 'short', day: 'numeric' });
     }
@@ -2612,7 +3207,10 @@ export class InputComponent implements OnInit {
     this.notesListSubscription?.unsubscribe();
     this.autoSaveSubscription?.unsubscribe();
     this.mobileComposerSubscription?.unsubscribe();
+    this.closeMobileComposerSubscription?.unsubscribe();
+    this.preferencesSubscription?.unsubscribe();
     this.unbindKeyboardOffset();
+    this.unbindAndroidBackgroundLocationResume();
     this.unlockBodyScroll();
   }
 
@@ -2631,7 +3229,8 @@ export class InputComponent implements OnInit {
       }
     }
     if (!this.cboxDragImage) {
-      this.checkBoxes = JSON.parse(JSON.stringify(note.checkBoxes || []));
+      this.checkBoxes = this.normalizeCheckBoxes(note.checkBoxes || []);
+      this.resetCboxHistory();
     }
     const oldDrawing = this.images.find(i => i.id === 'drawing');
     this.images = (note.images || []).map(image => ({ ...image, dataUrl: this.auth.authenticatedImageUrl(image.dataUrl) }));
@@ -2702,6 +3301,9 @@ export class InputComponent implements OnInit {
     if (this.pendingReminderDate) {
       return { dueAtUtc: this.pendingReminderDate.toISOString() }
     }
+    if (this.pendingReminderLocation) {
+      return { locationName: this.pendingReminderLocation.locationName }
+    }
     if (!this.isEditing || !this.noteToEdit.id) return null
     return this.reminderService.reminders$.value.find(r => r.noteId === this.noteToEdit.id && r.status === 'pending')
   }
@@ -2730,18 +3332,45 @@ export class InputComponent implements OnInit {
       return
     }
 
-    // No reminder yet: a transparent <input type="date"> is overlaid on the
-    // alarm icon, so the user's tap reaches the input directly and the
-    // browser opens its native picker without any JS bridge. iOS Safari
-    // won't open a date picker from .click() / .showPicker() — only from a
-    // real user tap on the input — which is why we rely on this overlay.
-    // On platforms where the user-agent doesn't render an inline picker
-    // for a focused date input (uncommon), we fall back to .showPicker().
+    if (this.keptPlugins.supportsNativeLocationReminders) {
+      this.openReminderTypeDialog()
+      return
+    }
+
     this.customDate = ''
     this.customTime = ''
     this.calendarMonth = this.startOfMonth(new Date())
     this.destroyTimePicker()
     this.showReminderDateDialog = true
+  }
+
+  openReminderTypeDialog() {
+    this.showReminderPicker = false
+    this.showReminderTypeDialog = true
+    this.showReminderDateDialog = false
+    this.showReminderLocationDialog = false
+    this.customDate = ''
+    this.customTime = ''
+    this.calendarMonth = this.startOfMonth(new Date())
+    this.destroyTimePicker()
+    this.resetLocationState()
+    document.removeEventListener('mousedown', this.pickerOutsideHandler)
+    setTimeout(() => document.addEventListener('mousedown', this.pickerOutsideHandler), 0)
+  }
+
+  chooseReminderDateTime() {
+    this.showReminderTypeDialog = false
+    this.showReminderDateDialog = true
+  }
+
+  chooseReminderPlace() {
+    this.showReminderTypeDialog = false
+    this.showReminderLocationDialog = true
+    this.openPlaceChooser()
+  }
+
+  cancelReminderType() {
+    this.closeReminderPicker()
   }
 
   private openDateThenTimeFlow(trigger?: HTMLElement | null) {
@@ -2906,9 +3535,36 @@ export class InputComponent implements OnInit {
 
   closeReminderPicker() {
     this.showReminderPicker = false
+    this.showReminderTypeDialog = false
     this.showReminderDateDialog = false
+    this.showReminderLocationDialog = false
+    this.resetReminderRepeatState()
+    this.resetLocationState()
     this.destroyTimePicker()
     document.removeEventListener('mousedown', this.pickerOutsideHandler)
+  }
+
+  setReminderRepeatType(type: ReminderRepeatType) {
+    this.reminderRepeatType = type
+    if (type !== 'custom_days') this.reminderRepeatCustomDays = 2
+  }
+
+  private selectedReminderRepeatRule(): ReminderRepeatRule | null {
+    if (this.reminderRepeatType === 'none') {
+      return this.reminderMoveToTopOnTrigger ? { type: 'none', moveToTopOnTrigger: true } : null
+    }
+    const intervalDays = Math.max(1, Math.floor(Number(this.reminderRepeatCustomDays) || 1))
+    return {
+      type: this.reminderRepeatType,
+      ...(this.reminderRepeatType === 'custom_days' ? { intervalDays } : {}),
+      moveToTopOnTrigger: this.reminderMoveToTopOnTrigger
+    }
+  }
+
+  private resetReminderRepeatState() {
+    this.reminderRepeatType = 'none'
+    this.reminderRepeatCustomDays = 2
+    this.reminderMoveToTopOnTrigger = false
   }
 
   // Synchronous-from-gesture permission request. iOS Safari refuses to show
@@ -2952,36 +3608,43 @@ export class InputComponent implements OnInit {
 
   private pickerOutsideHandler = (event: Event) => {
     const target = event.target as HTMLElement
-    const picker = document.querySelector('.reminder-picker')
+    const picker = document.querySelector('.reminder-picker, .reminder-date-dialog')
     const isTimePickerClick = target.closest('.tp-ui-modal') || target.closest('.tp-ui-wrapper')
     if (picker && !picker.contains(target) && !isTimePickerClick) {
       this.closeReminderPicker()
     }
   }
 
-  async setReminder(date: Date) {
+  setReminder(date: Date) {
     // Backup prompt for users who skipped the picker open (e.g. via custom
     // date input). Permission was already requested when the picker opened.
     this.promptForNotificationPermission()
+    const repeatRule = this.selectedReminderRepeatRule()
     if (this.isEditing && this.noteToEdit.id) {
       const existing = this.getActiveReminder()
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
       if (existing && (existing as any).id) {
-        await this.reminderService.update((existing as any).id, { dueAtUtc: date.toISOString(), status: 'pending' })
+        this.reminderService.update((existing as any).id, { dueAtUtc: date.toISOString(), status: 'pending', repeatRule })
+          .then(result => { if (!result) this.showReminderSaveError() })
+          .catch(() => this.showReminderSaveError())
       } else {
-        await this.reminderService.create({
+        this.reminderService.create({
           noteId: this.noteToEdit.id,
           dueAtUtc: date.toISOString(),
           timezone: tz,
+          repeatRule,
           title: this.notePlainText(this.noteToEdit.noteTitle),
           body: this.notePlainText(this.noteToEdit.noteBody)
-        })
+        }).then(result => { if (!result) this.showReminderSaveError() })
+          .catch(() => this.showReminderSaveError())
       }
     } else {
       // For new notes, store locally until save
       this.pendingReminderDate = date
+      this.pendingReminderRepeatRule = repeatRule
     }
     this.closeReminderPicker()
+    this.resetReminderRepeatState()
     this.cd.detectChanges()
   }
 
@@ -2991,24 +3654,38 @@ export class InputComponent implements OnInit {
     const t = this.toTwentyFourHourTime(this.customTime || timeInp.value)
     
     if (!d || !t) return
-    this.closeReminderPicker()
     this.customPickerOpen = false
     this.setReminder(new Date(`${d}T${t}`))
   }
 
   async clearReminder(event: Event) {
     event.stopPropagation()
+    if (this.pendingReminderDate || this.pendingReminderLocation) {
+      this.pendingReminderDate = null
+      this.pendingReminderRepeatRule = null
+      this.pendingReminderLocation = null
+      this.pendingAndroidLocationReminder = null
+      this.showAndroidBackgroundLocationEducation = false
+      this.androidBackgroundLocationMessage = ''
+      this.unbindAndroidBackgroundLocationResume()
+      this.closeReminderPicker()
+      this.cd.detectChanges()
+      return
+    }
     if (this.isEditing && this.noteToEdit.id) {
       const existing = this.getActiveReminder()
       if (existing && (existing as any).id) await this.reminderService.delete((existing as any).id)
     } else {
       this.pendingReminderDate = null
+      this.pendingReminderRepeatRule = null
+      this.pendingReminderLocation = null
     }
     this.closeReminderPicker()
     this.cd.detectChanges()
   }
 
   private createTimePicker(dateInput: HTMLInputElement | null, timeInput: HTMLInputElement) {
+    if (this.preferences.value.useTwentyFourHourTime) ensureTimepickerWheelPlugin()
     if (this.customTimePicker && this.customTimePickerInput === timeInput) {
       this.timePickerDateInput = dateInput || this.timePickerDateInput
       return
@@ -3018,8 +3695,14 @@ export class InputComponent implements OnInit {
     this.customTimePickerInput = timeInput
     timeInput.value = this.customTime || this.currentTimeValue()
     this.customTimePicker = new TimepickerUI(timeInput, {
-      clock: { currentTime: { time: new Date(), updateInput: true } },
-      ui: { editable: false },
+      clock: {
+        type: this.preferences.value.useTwentyFourHourTime ? '24h' : '12h',
+        currentTime: { time: new Date(), updateInput: true }
+      },
+      ui: {
+        mode: this.preferences.value.useTwentyFourHourTime ? 'compact-wheel' : 'clock',
+        editable: false
+      },
       callbacks: {
         onOpen: () => {
         },
@@ -3066,11 +3749,572 @@ export class InputComponent implements OnInit {
   }
 
   private currentTimeValue() {
-    return new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    return new Date().toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: this.preferences.value.useTwentyFourHourTime ? false : undefined
+    })
   }
 
   inHours(n: number): Date { return new Date(Date.now() + n * 60 * 60 * 1000) }
   tomorrow(): Date { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); return d }
   nextWeek(): Date { const d = new Date(); const daysUntilMonday = ((8 - d.getDay()) % 7) || 7; d.setDate(d.getDate() + daysUntilMonday); d.setHours(9, 0, 0, 0); return d }
-  formatReminderDate(isoString: string): string { return new Date(isoString).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) }
+  formatReminderDate(isoString: string): string {
+    return new Date(isoString).toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: this.preferences.value.useTwentyFourHourTime ? '2-digit' : 'numeric',
+      minute: '2-digit',
+      hour12: this.preferences.value.useTwentyFourHourTime ? false : undefined
+    })
+  }
+
+  // ─── Location reminders ───────────────────────────────────────────────
+
+  async openPlaceChooser() {
+    this.placeDialogView = 'choose'
+    this.resetLocationState()
+    this.savedPlacesSearch = ''
+    this.locationTrigger = 'arrive'
+    await Promise.all([this.loadSavedPlaces(), this.loadCurrentLocation()])
+  }
+
+  backFromPlaceDialog() {
+    if (this.placeDialogView !== 'choose') {
+      this.openPlaceChooser()
+      return
+    }
+    this.showReminderLocationDialog = false
+    this.showReminderTypeDialog = true
+  }
+
+  async loadSavedPlaces() {
+    this.savedPlacesLoading = true
+    this.savedPlacesError = ''
+    try {
+      this.savedPlaces = await this.savedPlacesService.list()
+    } catch {
+      this.savedPlacesError = 'Saved places could not load.'
+    } finally {
+      this.savedPlacesLoading = false
+      this.cd.detectChanges()
+    }
+  }
+
+  visiblePlaceItems(): PlaceListItem[] {
+    const q = this.savedPlacesSearch.trim().toLowerCase()
+    const items: PlaceListItem[] = [...this.savedPlaces]
+    if (!this.savedPlaces.some(place => place.placeType === 'home')) {
+      items.push({ id: 'home-prompt', name: 'Home', address: 'Add your home address', placeType: 'home', prompt: true })
+    }
+    if (!this.savedPlaces.some(place => place.placeType === 'work')) {
+      items.push({ id: 'work-prompt', name: 'Work', address: 'Add your work address', placeType: 'work', prompt: true })
+    }
+    if (!q) return items
+    return items.filter(place =>
+      place.name.toLowerCase().includes(q) ||
+      (place.address || '').toLowerCase().includes(q)
+    )
+  }
+
+  visibleSavedPlaces() {
+    const q = this.savedPlacesSearch.trim().toLowerCase()
+    if (!q) return this.savedPlaces
+    return this.savedPlaces.filter(place =>
+      place.name.toLowerCase().includes(q) ||
+      (place.address || '').toLowerCase().includes(q)
+    )
+  }
+
+  placeIcon(placeType: SavedPlaceType) {
+    switch (placeType) {
+      case 'home': return 'home'
+      case 'work': return 'business_center'
+      case 'gym': return 'fitness_center'
+      default: return 'location_on'
+    }
+  }
+
+  placeDistanceLabel(place: PlaceListItem) {
+    if ('prompt' in place) return ''
+    if (this.currentLocationLoading && !this.currentLocation) return '...'
+    if (!this.currentLocation) return ''
+    const meters = this.distanceMeters(
+      this.currentLocation.latitude,
+      this.currentLocation.longitude,
+      place.latitude,
+      place.longitude
+    )
+    return this.formatDistance(meters)
+  }
+
+  openManagePlaces() {
+    this.placeDialogView = 'manage'
+    this.savedPlacesSearch = ''
+  }
+
+  openAddSavedPlace(seedType: SavedPlaceType = 'other') {
+    this.placeDialogView = 'add'
+    this.resetLocationState()
+    this.locationTrigger = 'arrive'
+    this.addPlaceType = seedType
+    this.addPlaceName = seedType === 'other' ? '' : this.titleCase(seedType)
+    this.addPlaceRadiusMeters = 100
+  }
+
+  openSearchPlace(keepPhrase = false) {
+    const phrase = this.locationPhrase
+    this.placeDialogView = 'search'
+    this.resetLocationState()
+    if (keepPhrase) this.locationPhrase = phrase
+    this.locationTrigger = 'arrive'
+  }
+
+  async resolveLocation(view: PlaceDialogView = this.placeDialogView) {
+    const phrase = this.locationPhrase.trim()
+    if (!phrase) return
+    this.resolving = true
+    this.locationState = 'idle'
+    try {
+      if (!await this.ensureAndroidForegroundLocationDisclosureForSearch(view)) return
+      await this.loadCurrentLocation()
+      const result = await this.keptPlugins.resolveLocation(phrase, this.savedPlaces, this.currentLocation)
+      if (!result) {
+        this.permissionReason = 'Location search is not available in this version of the app.'
+        this.locationState = 'permission'
+        return
+      }
+      switch (result.status) {
+        case 'resolved':
+          this.resolvedLocation = result.location
+          this.locationPhrase = result.location.displayName
+          this.locationState = 'resolved'
+          if (view === 'add' && !this.addPlaceName.trim()) {
+            this.addPlaceName = this.suggestPlaceName(result.location.displayName)
+          }
+          this.hydrateLocationMapPreview(result.location)
+          break
+        case 'ambiguous':
+          this.candidates = result.candidates
+          this.locationState = 'ambiguous'
+          break
+        case 'notFound':
+          this.locationState = 'notFound'
+          break
+        case 'needsLocationPermission':
+          this.permissionReason = result.reason
+          this.locationState = 'permission'
+          break
+      }
+    } finally {
+      this.resolving = false
+    }
+  }
+
+  selectCandidate(candidate: ResolvedLocation) {
+    this.resolvedLocation = candidate
+    this.locationPhrase = candidate.displayName
+    this.locationState = 'resolved'
+    if (this.placeDialogView === 'add' && !this.addPlaceName.trim()) {
+      this.addPlaceName = this.suggestPlaceName(candidate.displayName)
+    }
+    this.hydrateLocationMapPreview(candidate)
+  }
+
+  resetLocationState() {
+    this.locationState = 'idle'
+    this.locationPhrase = ''
+    this.resolvedLocation = null
+    this.locationMapPreview = ''
+    this.candidates = []
+    this.resolving = false
+    this.permissionReason = ''
+  }
+
+  clearLocation() {
+    this.resetLocationState()
+    this.showReminderLocationDialog = false
+  }
+
+  async confirmSavedPlaceReminder(place: LocationSavedPlace) {
+    await this.prepareLocationReminder({
+      displayName: place.name || place.address || 'Saved place',
+      latitude: place.latitude,
+      longitude: place.longitude,
+      radiusMeters: place.radiusMeters,
+      confidence: 'high',
+      source: 'savedLocation'
+    }, place.locationTrigger)
+  }
+
+  choosePlaceItem(place: PlaceListItem) {
+    if ('prompt' in place) {
+      this.openAddSavedPlace(place.placeType)
+      return
+    }
+    this.confirmSavedPlaceReminder(place)
+  }
+
+  async confirmLocationReminder(location = this.resolvedLocation, trigger = this.locationTrigger) {
+    if (!location) return
+    await this.prepareLocationReminder(location, trigger)
+  }
+
+  private async prepareLocationReminder(location: ResolvedLocation, trigger: LocationTrigger) {
+    const permissionReady = await this.ensureLocationReminderPermissionsOrEducate(location, trigger)
+    if (!permissionReady) return
+    this.setPendingLocationReminder(location, trigger)
+  }
+
+  private async ensureLocationReminderPermissionsOrEducate(location: ResolvedLocation, trigger: LocationTrigger) {
+    const status = await this.reminderService.getAndroidLocationPermissionStatus()
+    if (!status) return true
+
+    let locationStatus = status
+    if (!locationStatus.foregroundGranted) {
+      this.pendingAndroidLocationReminder = { location, trigger }
+      this.androidLocationEducationMode = 'foreground'
+      this.androidBackgroundLocationMessage = ''
+      this.showAndroidBackgroundLocationEducation = true
+      this.cd.detectChanges()
+      return false
+    }
+
+    if (!locationStatus.backgroundGranted) {
+      this.pendingAndroidLocationReminder = { location, trigger }
+      this.androidLocationEducationMode = 'background'
+      this.androidBackgroundLocationMessage = ''
+      this.showAndroidBackgroundLocationEducation = true
+      this.bindAndroidBackgroundLocationResume()
+      this.cd.detectChanges()
+      return false
+    }
+
+    const notificationsOk = await this.reminderService.ensureAndroidGeofenceNotificationPermission()
+    if (!notificationsOk) {
+      this.permissionReason = 'Notification permission is needed so Kept can show location reminder alerts.'
+      this.locationState = 'permission'
+      return false
+    }
+    return true
+  }
+
+  private async ensureAndroidForegroundLocationDisclosureForSearch(view: PlaceDialogView) {
+    const status = await this.reminderService.getAndroidLocationPermissionStatus()
+    if (!status || status.foregroundGranted) return true
+    this.pendingAndroidLocationSearch = { view }
+    this.pendingAndroidLocationReminder = null
+    this.androidLocationEducationMode = 'foreground'
+    this.androidBackgroundLocationMessage = ''
+    this.showAndroidBackgroundLocationEducation = true
+    this.cd.detectChanges()
+    return false
+  }
+
+  async continueAndroidLocationDisclosure() {
+    if (this.androidLocationEducationMode === 'background') {
+      await this.openAndroidBackgroundLocationSettings()
+      return
+    }
+
+    const pendingReminder = this.pendingAndroidLocationReminder
+    const pendingSearch = this.pendingAndroidLocationSearch
+    if (!pendingReminder && !pendingSearch) return
+    this.androidBackgroundLocationMessage = ''
+
+    const status = await this.reminderService.requestAndroidForegroundLocationPermission()
+    if (!status?.foregroundGranted) {
+      this.androidBackgroundLocationMessage = 'Location permission is needed to create location reminders.'
+      this.cd.detectChanges()
+      return
+    }
+
+    if (pendingSearch) {
+      this.pendingAndroidLocationSearch = null
+      this.showAndroidBackgroundLocationEducation = false
+      this.androidBackgroundLocationMessage = ''
+      this.resolveLocation(pendingSearch.view)
+      return
+    }
+
+    const pending = pendingReminder!
+    if (!status.backgroundGranted) {
+      this.androidLocationEducationMode = 'background'
+      this.androidBackgroundLocationMessage = ''
+      this.bindAndroidBackgroundLocationResume()
+      this.cd.detectChanges()
+      return
+    }
+
+    const notificationsOk = await this.reminderService.ensureAndroidGeofenceNotificationPermission()
+    if (!notificationsOk) {
+      this.androidBackgroundLocationMessage = 'Notification permission is needed so Kept can show this reminder.'
+      this.cd.detectChanges()
+      return
+    }
+
+    this.pendingAndroidLocationReminder = null
+    this.showAndroidBackgroundLocationEducation = false
+    this.androidBackgroundLocationMessage = ''
+    this.unbindAndroidBackgroundLocationResume()
+    this.setPendingLocationReminder(pending.location, pending.trigger)
+  }
+
+  async openAndroidBackgroundLocationSettings() {
+    this.androidBackgroundLocationMessage = ''
+    await this.reminderService.openAndroidBackgroundLocationSettings()
+  }
+
+  cancelAndroidBackgroundLocationEducation() {
+    this.showAndroidBackgroundLocationEducation = false
+    this.androidLocationEducationMode = 'background'
+    this.androidBackgroundLocationMessage = ''
+    this.pendingAndroidLocationReminder = null
+    this.pendingAndroidLocationSearch = null
+    this.unbindAndroidBackgroundLocationResume()
+  }
+
+  private bindAndroidBackgroundLocationResume() {
+    if (this.androidBackgroundLocationResumeHandler || typeof document === 'undefined') return
+    this.androidBackgroundLocationResumeHandler = () => {
+      if (document.visibilityState === 'visible') this.resumePendingAndroidLocationReminder()
+    }
+    this.androidBackgroundLocationFocusHandler = () => this.resumePendingAndroidLocationReminder()
+    document.addEventListener('visibilitychange', this.androidBackgroundLocationResumeHandler)
+    window.addEventListener('focus', this.androidBackgroundLocationFocusHandler)
+  }
+
+  private unbindAndroidBackgroundLocationResume() {
+    if (this.androidBackgroundLocationResumeHandler) {
+      document.removeEventListener('visibilitychange', this.androidBackgroundLocationResumeHandler)
+      this.androidBackgroundLocationResumeHandler = undefined
+    }
+    if (this.androidBackgroundLocationFocusHandler) {
+      window.removeEventListener('focus', this.androidBackgroundLocationFocusHandler)
+      this.androidBackgroundLocationFocusHandler = undefined
+    }
+  }
+
+  private async resumePendingAndroidLocationReminder() {
+    const pending = this.pendingAndroidLocationReminder
+    if (!pending || this.androidBackgroundLocationResumeRunning) return
+    this.androidBackgroundLocationResumeRunning = true
+    try {
+      const status = await this.reminderService.getAndroidLocationPermissionStatus()
+      if (!status?.backgroundGranted) {
+        this.androidBackgroundLocationMessage = 'Permission still needed. Choose “Allow all the time” to enable this reminder.'
+        this.showAndroidBackgroundLocationEducation = true
+        this.cd.detectChanges()
+        return
+      }
+      const notificationsOk = await this.reminderService.ensureAndroidGeofenceNotificationPermission()
+      if (!notificationsOk) {
+        this.androidBackgroundLocationMessage = 'Notification permission is needed so Kept can show this reminder.'
+        this.showAndroidBackgroundLocationEducation = true
+        this.cd.detectChanges()
+        return
+      }
+      this.pendingAndroidLocationReminder = null
+      this.showAndroidBackgroundLocationEducation = false
+      this.androidBackgroundLocationMessage = ''
+      this.unbindAndroidBackgroundLocationResume()
+      this.setPendingLocationReminder(pending.location, pending.trigger)
+    } finally {
+      this.androidBackgroundLocationResumeRunning = false
+    }
+  }
+
+  private setPendingLocationReminder(location: ResolvedLocation, trigger: LocationTrigger) {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
+    const pendingLocation = {
+      locationName: location.displayName,
+      latitude: location.latitude,
+      longitude: location.longitude,
+      radiusMeters: location.radiusMeters,
+      locationTrigger: trigger,
+      timezone: tz
+    }
+
+    this.pendingReminderDate = null
+    this.pendingReminderLocation = pendingLocation
+    this.clearLocation()
+    this.showReminderLocationDialog = false
+    this.cd.detectChanges()
+
+    if (this.isEditing && this.noteToEdit.id) {
+      const noteId = this.noteToEdit.id
+      const title = this.notePlainText(this.noteTitle?.nativeElement?.innerHTML || this.noteToEdit.noteTitle || '')
+      const body = this.notePlainText(this.noteBody?.nativeElement?.innerHTML || this.noteToEdit.noteBody || '')
+      this.reminderService.create({
+        noteId,
+        locationName: pendingLocation.locationName,
+        latitude: pendingLocation.latitude,
+        longitude: pendingLocation.longitude,
+        radiusMeters: pendingLocation.radiusMeters,
+        locationTrigger: pendingLocation.locationTrigger,
+        timezone: pendingLocation.timezone,
+        title,
+        body
+      }).then(result => {
+        if (result) {
+          this.pendingReminderLocation = null
+          this.cd.detectChanges()
+        } else {
+          this.showReminderSaveError()
+        }
+      }).catch(() => this.showReminderSaveError())
+    }
+  }
+
+  async saveSavedPlace() {
+    const location = this.resolvedLocation
+    if (!location || !this.addPlaceName.trim() || this.addPlaceSaving) return
+    this.addPlaceSaving = true
+    try {
+      await this.savedPlacesService.create({
+        name: this.addPlaceName.trim(),
+        address: location.displayName,
+        placeType: this.addPlaceType,
+        latitude: location.latitude,
+        longitude: location.longitude,
+        radiusMeters: this.addPlaceRadiusMeters,
+        locationTrigger: this.locationTrigger,
+        mapPreviewUrl: this.locationMapPreview || null
+      })
+      await this.loadSavedPlaces()
+      this.placeDialogView = 'choose'
+      this.resetLocationState()
+    } catch {
+      this.savedPlacesError = 'Saved place could not be saved.'
+    } finally {
+      this.addPlaceSaving = false
+      this.cd.detectChanges()
+    }
+  }
+
+  placeSwipeStart(event: PointerEvent, place: LocationSavedPlace) {
+    this.placeSwipeStartPoint = { id: place.id, x: event.clientX, y: event.clientY }
+  }
+
+  placeSwipeMove(event: PointerEvent, place: LocationSavedPlace) {
+    if (!this.placeSwipeStartPoint || this.placeSwipeStartPoint.id !== place.id) return
+    const dx = event.clientX - this.placeSwipeStartPoint.x
+    const dy = event.clientY - this.placeSwipeStartPoint.y
+    if (Math.abs(dx) > 42 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+      this.swipingPlaceId = place.id
+    }
+  }
+
+  async placeSwipeEnd(place: LocationSavedPlace) {
+    if (!this.placeSwipeStartPoint || this.placeSwipeStartPoint.id !== place.id) return
+    this.placeSwipeStartPoint = undefined
+    if (this.swipingPlaceId !== place.id) this.swipingPlaceId = null
+  }
+
+  async deleteSavedPlace(place: LocationSavedPlace) {
+    this.swipingPlaceId = null
+    this.savedPlaces = this.savedPlaces.filter(item => item.id !== place.id)
+    this.cd.detectChanges()
+    try {
+      await this.savedPlacesService.delete(place.id)
+    } catch {
+      this.savedPlacesError = 'Saved place could not be deleted.'
+      await this.loadSavedPlaces()
+    }
+  }
+
+  toggleLocationTrigger() {
+    this.locationTrigger = this.locationTrigger === 'arrive' ? 'leave' : 'arrive'
+  }
+
+  setAddPlaceType(type: SavedPlaceType) {
+    this.addPlaceType = type
+    if (!this.addPlaceName.trim() && type !== 'other') {
+      this.addPlaceName = this.titleCase(type)
+    }
+  }
+
+  private suggestPlaceName(displayName: string) {
+    return displayName.split(/[,\u2022]/)[0]?.trim().slice(0, 80) || ''
+  }
+
+  private titleCase(value: string) {
+    return value.charAt(0).toUpperCase() + value.slice(1)
+  }
+
+  private loadCurrentLocation() {
+    if (this.keptPlugins.isIos || this.currentLocation || typeof navigator === 'undefined' || !navigator.geolocation) {
+      return Promise.resolve()
+    }
+    if (this.keptPlugins.isAndroid) {
+      return this.reminderService.getAndroidLocationPermissionStatus().then(status => {
+        if (!status?.foregroundGranted) return
+        return this.readCurrentLocation()
+      })
+    }
+    return this.readCurrentLocation()
+  }
+
+  private readCurrentLocation() {
+    this.currentLocationLoading = true
+    return new Promise<void>(resolve => {
+      navigator.geolocation.getCurrentPosition(
+        position => {
+          this.currentLocation = {
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude
+          }
+          this.currentLocationLoading = false
+          this.cd.detectChanges()
+          resolve()
+        },
+        () => {
+          this.currentLocationLoading = false
+          this.cd.detectChanges()
+          resolve()
+        },
+        { enableHighAccuracy: false, maximumAge: 5 * 60 * 1000, timeout: 4000 }
+      )
+    })
+  }
+
+  private distanceMeters(fromLat: number, fromLng: number, toLat: number, toLng: number) {
+    const toRad = (value: number) => value * Math.PI / 180
+    const earthRadiusMeters = 6371000
+    const dLat = toRad(toLat - fromLat)
+    const dLng = toRad(toLng - fromLng)
+    const lat1 = toRad(fromLat)
+    const lat2 = toRad(toLat)
+    const a = Math.sin(dLat / 2) ** 2 +
+      Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2
+    return earthRadiusMeters * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  }
+
+  private formatDistance(meters: number) {
+    if (meters < 1000) return `${Math.max(1, Math.round(meters))} m`
+    const km = meters / 1000
+    return `${km < 10 ? Number(km.toFixed(1)) : Math.round(km)} km`
+  }
+
+  private async hydrateLocationMapPreview(location: ResolvedLocation) {
+    try {
+      this.locationMapPreview = await this.keptPlugins.locationMapPreview(location) || ''
+    } catch {
+      this.locationMapPreview = ''
+    } finally {
+      this.cd.detectChanges()
+    }
+  }
+
+  private showReminderSaveError() {
+    try {
+      Snackbar.show({ pos: 'bottom-left', text: "Reminder couldn't be saved", duration: 3500 })
+    } catch {}
+  }
+
+  private showNoteSaveError() {
+    try {
+      Snackbar.show({ pos: 'bottom-left', text: "Note couldn't be saved", duration: 3500 })
+    } catch {}
+  }
 }

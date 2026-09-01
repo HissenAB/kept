@@ -1,4 +1,4 @@
-import { HttpClient, HttpHeaders } from '@angular/common/http';
+import { HttpClient, HttpErrorResponse, HttpHeaders } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 import { firstValueFrom, BehaviorSubject } from 'rxjs';
 import { environment } from 'src/environments/environment';
@@ -15,6 +15,7 @@ type LoginResponse = {
 export class AuthService {
   private readonly sessionKey = 'gk_session';
   private readonly apiUrl = environment.apiUrl;
+  private lastSessionExpiredNoticeAt = 0;
   currentUser$ = new BehaviorSubject<AuthSessionI | null>(this.getStoredSession());
 
   constructor(private http: HttpClient) {
@@ -37,8 +38,30 @@ export class AuthService {
     return new HttpHeaders({ Authorization: `Bearer ${this.token}` });
   }
 
+  isAuthExpiredError(error: unknown) {
+    return error instanceof HttpErrorResponse && error.status === 401;
+  }
+
+  notifySessionExpired(error?: unknown) {
+    if (error && !this.isAuthExpiredError(error)) return false;
+    const now = Date.now();
+    if (now - this.lastSessionExpiredNoticeAt < 4000) return true;
+    this.lastSessionExpiredNoticeAt = now;
+    try {
+      (window as any).Snackbar?.show({
+        pos: 'bottom-left',
+        text: 'Session expired. Please sign in again before saving.',
+        duration: 5200
+      });
+    } catch {}
+    return true;
+  }
+
   canonicalImageUrl(value: string) {
     const raw = String(value || '').trim();
+    const offlineMap = (window as typeof window & { __keptOfflineMediaCanonical?: Map<string, string> }).__keptOfflineMediaCanonical;
+    const offlineCanonical = offlineMap?.get(raw);
+    if (offlineCanonical) return offlineCanonical;
     if (!raw || raw.startsWith('data:')) return raw;
     let pathname = raw;
     try {
@@ -54,6 +77,9 @@ export class AuthService {
   }
 
   authenticatedImageUrl(value: string) {
+    const raw = String(value || '').trim();
+    const offlineMap = (window as typeof window & { __keptOfflineMediaCanonical?: Map<string, string> }).__keptOfflineMediaCanonical;
+    if (offlineMap?.has(raw)) return raw;
     const canonical = this.canonicalImageUrl(value);
     if (!canonical.startsWith('/api/uploads/images/')) return canonical;
     const token = this.token;

@@ -32,6 +32,7 @@ ENV PUID=1000
 ENV PGID=1000
 
 EXPOSE 6767
+VOLUME ["/app/data"]
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "server/server.js"]

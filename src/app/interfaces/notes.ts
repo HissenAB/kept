@@ -3,6 +3,7 @@ import { ShareUserI } from './users';
 
 export interface NoteI {
     id?: number
+    syncId?: string
     ownerUserId?: number
     ownerDisplayName?: string
     ownerUsername?: string
@@ -26,12 +27,20 @@ export interface NoteI {
     attachments?: NoteAttachmentI[]
     isCbox: boolean
     labels: LabelI[]
+    binder?: string
+    locked?: boolean
+    lockSalt?: string
+    lockHash?: string
     archived: boolean
     trashed: boolean
     trashedAt?: string
     sortOrder?: number
     createdAt?: string
     updatedAt?: string
+    lwwPhysicalMs?: number
+    lwwLogical?: number
+    lwwDeviceId?: string
+    lwwOperationId?: string
     ownerOnline?: boolean
     lastEditorUserId?: number
     lastEditorDisplayName?: string
@@ -48,16 +57,23 @@ export interface NoteImageI {
 
 export interface NoteAttachmentI {
     id: number
+    syncId?: string
+    noteId?: number
     originalName: string
     fileSize: number
     mimeType: string
     uploadedAt: string
+    lwwPhysicalMs?: number
+    lwwLogical?: number
+    lwwDeviceId?: string
+    lwwOperationId?: string
 }
 
 export interface CheckboxI {
     done: boolean,
     data: any,
     id: number
+    indentLevel?: number
 }
 
 export type UpdateKeyI = {

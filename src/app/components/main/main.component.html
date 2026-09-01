@@ -1,6 +1,15 @@
 <app-navbar></app-navbar>
 <app-update-banner></app-update-banner>
-<section class="main-section">
+<section class="main-section" [class.native-phone-layout]="nativePhoneLayout"
+    [class.sidebar-collapsed]="(Shared.sideBarCollapsed | async)">
+    @if ((offlineSync.state$ | async); as syncState) {
+      @if (syncState !== 'saved') {
+        <div class="offline-sync-state" [class.is-error]="syncState === 'error'" role="status">
+          <span class="material-symbols-outlined">{{ syncState === 'offline' ? 'cloud_off' : syncState === 'error' ? 'sync_problem' : 'sync' }}</span>
+          <span>{{ syncState === 'offline' ? 'Saved offline' : syncState === 'error' ? 'Sync needs attention' : 'Syncing' }}</span>
+        </div>
+      }
+    }
     <div class="d-flex">
         <div class="sidenav-sticky">
             <app-sidenav></app-sidenav>
@@ -13,11 +22,29 @@
     <button class="mobile-compose-fab" type="button" aria-label="New note" (click)="openMobileComposer()">
       <span class="material-symbols-outlined">edit_note</span>
     </button>
-    @if (Shared.isIos) {
+    @if (smartCaptureEntryVisible()) {
       <button class="smart-capture-fab" type="button" aria-label="Smart Capture" (click)="startSmartCapture()">
         <span class="material-symbols-outlined">mic</span>
         <span class="smart-capture-label">Smart Capture</span>
       </button>
+    }
+    @if (isAndroidSmartCapture() && showGemmaFallbackInstallPrompt) {
+      <div class="smart-gemma-prompt" role="region" aria-label="Smart Capture local model">
+        <button type="button" class="smart-gemma-main" (click)="installGemmaFallbackModel()" [disabled]="gemmaFallbackInstalling">
+          <span class="material-symbols-outlined">auto_awesome</span>
+          <span>
+            <strong>Smart Capture</strong>
+            <small>Can run privately on this device with Kept’s local Gemma model.</small>
+            <small class="smart-gemma-action">{{ gemmaFallbackInstalling ? 'Installing local Gemma model…' : 'Install local Gemma model' }}</small>
+            @if (gemmaFallbackProgressPercent() !== null) {
+              <small>{{ gemmaFallbackProgressPercent() }}%</small>
+            }
+          </span>
+        </button>
+        @if (gemmaFallbackError) {
+          <div class="smart-gemma-error">{{ gemmaFallbackError }}</div>
+        }
+      </div>
     }
     @if ((Shared.showInstallButton | async) && !Shared.isInstallFabDismissed()) {
       <div class="mobile-install-fab" role="region" aria-label="Install Kept">
@@ -50,7 +77,7 @@
   </div>
 }
 
-@if (Shared.isIos && smartCaptureOpen) {
+@if (smartCaptureAvailable && smartCaptureOpen) {
   <section class="smart-capture-panel" [class.is-listening]="smartCaptureListening || !smartCapturePlan"
     (click)="$event.stopPropagation()" aria-label="Smart Capture">
     <input #smartReminderTimeInp type="text" class="timepicker-ui-input rp-hidden-time" autocomplete="off" readonly
@@ -146,14 +173,15 @@
             @let action = proposal.action;
             @let actionIndex = proposal.index;
             <article class="smart-proposal-card"
-              [class.is-selected]="selectedSmartActions.has(actionIndex)"
+              [class.is-selected]="isSmartActionSelected(actionIndex)"
               [class.is-update]="proposalBadge(action) !== 'New'"
+              [class.is-dark-bg]="proposalHasDarkBackground(action)"
               [style.--proposal-bg]="proposalColor(action, actionIndex)">
               <button type="button" class="smart-proposal-check"
-                [class.checked]="selectedSmartActions.has(actionIndex)"
-                [attr.aria-label]="selectedSmartActions.has(actionIndex) ? 'Unselect proposal' : 'Select proposal'"
-                (click)="toggleSmartAction(actionIndex, !selectedSmartActions.has(actionIndex))">
-                @if (selectedSmartActions.has(actionIndex)) {
+                [class.checked]="isSmartActionSelected(actionIndex)"
+                [attr.aria-label]="isSmartActionSelected(actionIndex) ? 'Unselect proposal' : 'Select proposal'"
+                (click)="toggleSmartAction(actionIndex, !isSmartActionSelected(actionIndex))">
+                @if (isSmartActionSelected(actionIndex)) {
                   <span class="material-symbols-outlined">check</span>
                 }
               </button>
@@ -205,7 +233,67 @@
                 </div>
               }
 
-              @if (action.type === 'set_reminder' && !$any(action).dueAtUtc) {
+              @if (reminderProposalsForAction(actionIndex).length) {
+                <div class="smart-reminder-block" aria-label="Reminder proposal">
+                  @for (reminder of reminderProposalsForAction(actionIndex); track reminder.index) {
+                    <div class="smart-reminder-attached">
+                      <span class="material-symbols-outlined">notifications</span>
+                      <div>
+                        <strong>Reminder</strong>
+                        <span>{{ proposalBody(reminder.action) }}</span>
+                      </div>
+                      @if (!smartReminderHasTrigger(reminder.action)) {
+                        <button type="button" class="smart-reminder-button"
+                          (click)="openSmartReminderPicker(reminder.index, $event)">
+                          Set time
+                        </button>
+                      }
+                    </div>
+                    @if (smartReminderActionIndex === reminder.index) {
+                      <div class="reminder-date-dialog smart-reminder-dialog"
+                        (mousedown)="$event.stopPropagation()" (click)="$event.stopPropagation()"
+                        role="dialog" aria-label="Set reminder date">
+                        <div class="rd-title">Set reminder</div>
+                        <div class="rd-calendar" aria-label="Reminder date calendar">
+                          <div class="rd-calendar-head">
+                            <button type="button" class="rd-nav" aria-label="Previous month" (click)="shiftCalendarMonth(-1)">
+                              <span class="material-symbols-outlined">chevron_left</span>
+                            </button>
+                            <div class="rd-month">{{calendarMonthLabel()}}</div>
+                            <button type="button" class="rd-nav" aria-label="Next month" (click)="shiftCalendarMonth(1)">
+                              <span class="material-symbols-outlined">chevron_right</span>
+                            </button>
+                          </div>
+                          <div class="rd-weekdays">
+                            @for (weekday of calendarWeekdays; track $index) {
+                              <span>{{weekday}}</span>
+                            }
+                          </div>
+                          <div class="rd-days">
+                            @for (day of calendarDays(); track day.date) {
+                              <button type="button" class="rd-day"
+                                [class.outside]="!day.currentMonth"
+                                [class.today]="day.today"
+                                [class.selected]="day.selected"
+                                [disabled]="day.disabled"
+                                (click)="selectCalendarDate(day.date)">
+                                {{day.day}}
+                              </button>
+                            }
+                          </div>
+                        </div>
+                        <div class="rd-actions">
+                          <button type="button" class="rd-secondary" (click)="cancelSmartReminderDate()">Cancel</button>
+                          <button type="button" class="rd-primary" [disabled]="!smartReminderDate"
+                            (click)="confirmSmartReminderDate(smartReminderTimeInp)">Pick time</button>
+                        </div>
+                      </div>
+                    }
+                  }
+                </div>
+              }
+
+              @if (action.type === 'set_reminder' && !smartReminderHasTrigger(action)) {
                 <button type="button" class="smart-reminder-button"
                   (click)="openSmartReminderPicker(actionIndex, $event)">
                   Set reminder time
@@ -261,9 +349,11 @@
       <button type="button" class="smart-round-action danger" aria-label="Cancel" (click)="cancelSmartCapture()">
         <span class="material-symbols-outlined">close</span>
       </button>
-      <button type="button" class="smart-round-action" aria-label="Smart Capture" (click)="toggleSmartVoiceCapture()">
-        <span class="material-symbols-outlined">{{smartVoiceIcon()}}</span>
-      </button>
+      @if (isIosSmartCapture() || isAndroidSmartCapture()) {
+        <button type="button" class="smart-round-action" aria-label="Smart Capture" (click)="toggleSmartVoiceCapture()">
+          <span class="material-symbols-outlined">{{smartVoiceIcon()}}</span>
+        </button>
+      }
       <button type="button" class="smart-approve-action"
         [disabled]="smartPrimaryDisabled()"
         (click)="smartPrimaryAction()">

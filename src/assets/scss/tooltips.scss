@@ -11,15 +11,25 @@
         display: block;
     }
 
-    @media (max-width: 599px) {
-        &[data-is-tooltip-open="true"] {
+    @media (max-width: 599px), (max-height: 500px) and (orientation: landscape) {
+        &[data-is-tooltip-open="true"]:not(.selectionMoreMenu) {
             position: fixed !important;
             top: 50% !important;
             left: 50% !important;
             transform: translate(-50%, -50%) !important;
             width: 90% !important;
             max-width: 320px !important;
+            max-height: calc(100dvh - 24px);
+            overflow-y: auto;
+            overscroll-behavior: contain;
             z-index: 2100 !important;
+        }
+
+        &.selectionMoreMenu[data-is-tooltip-open="true"] {
+            max-width: calc(100vw - 24px);
+            min-width: 160px;
+            width: max-content;
+            z-index: 2100;
         }
     }
 
@@ -142,19 +152,23 @@
             display: flex;
             padding: 8px 12px;
             align-items: center;
+            gap: 8px;
 
             .search-icon {
                 background-image: url(/assets/images/svg/search.svg);
                 background-size: 14px 18px;
+                flex: 0 0 18px;
                 height: 18px;
-                width: 18px;
                 opacity: .35;
                 background-repeat: no-repeat;
+                width: 18px;
             }
 
             input {
-                padding: 2px 22px 2px 2px;
-                width: 100%;
+                padding: 2px;
+                flex: 1 1 auto;
+                min-width: 0;
+                width: auto;
                 background-color: transparent;
                 border: none;
                 border-bottom: 1px solid transparent;

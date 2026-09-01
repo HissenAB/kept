@@ -1,4 +1,4 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnDestroy, OnInit } from '@angular/core';
 import * as JSZip from 'jszip';
 import { ActivatedRoute, Router } from '@angular/router';
 import { GoogleCalendarStatusI } from 'src/app/interfaces/reminder';
@@ -6,6 +6,33 @@ import { ReminderService } from 'src/app/services/reminder.service';
 import { NotesService, TakeoutImportResult } from 'src/app/services/notes.service';
 
 import { AuthService } from 'src/app/services/auth.service';
+import { PushNotificationService } from 'src/app/services/push-notification.service';
+import { UserPreferencesService } from 'src/app/services/user-preferences.service';
+import {
+  androidSmartCaptureEnabled,
+  androidMajorVersion,
+  isAndroidPlatform,
+  isLegacyAndroidSmartCaptureDevice,
+  isIosPlatform,
+  legacyAndroidSmartCaptureEnabled,
+  setAndroidSmartCaptureEnabled,
+  setLegacyAndroidSmartCaptureEnabled
+} from 'src/app/utils/platform';
+
+export type PermissionStatus = 'granted' | 'denied' | 'notDetermined';
+
+export interface PermissionsStatus {
+  reminders: PermissionStatus;
+  speechRecognition: PermissionStatus;
+  microphone: PermissionStatus;
+  location: PermissionStatus;
+}
+
+export interface PermissionItem {
+  key: keyof PermissionsStatus;
+  label: string;
+  description: string;
+}
 
 @Component({
   selector: 'app-settings',
@@ -13,7 +40,7 @@ import { AuthService } from 'src/app/services/auth.service';
   styleUrls: ['../auth/auth-shared.scss', './settings.component.scss'],
   standalone: false
 })
-export class SettingsComponent implements OnInit {
+export class SettingsComponent implements OnInit, OnDestroy {
 
   // ── Global feedback ────────────────────────────────────────────────────
   error = '';
@@ -71,12 +98,47 @@ export class SettingsComponent implements OnInit {
   deleteAccountConfirmation = '';
   deleteAccountError = '';
 
+  // ── iOS Permissions ────────────────────────────────────────────────────
+  isIos = isIosPlatform();
+  isAndroid = isAndroidPlatform();
+  androidSmartCaptureEnabled = androidSmartCaptureEnabled();
+  legacyAndroidSmartCaptureVisible = isLegacyAndroidSmartCaptureDevice();
+  legacyAndroidSmartCaptureEnabled = legacyAndroidSmartCaptureEnabled();
+  androidMajorVersion = androidMajorVersion();
+  notificationPermissionsVisible = false;
+  notificationPermission: NotificationPermission | 'unsupported' = 'unsupported';
+  notificationPromptDismissed = false;
+  useTwentyFourHourTime = false;
+  moveCompletedChecklistItemsToBottom = true;
+  richLinkPreviews = true;
+  notePreviewTextSize: 'compact' | 'default' | 'large' = 'default';
+  readonly notePreviewTextSizeOptions: Array<{ value: 'compact' | 'default' | 'large'; label: string }> = [
+    { value: 'compact', label: 'Compact' },
+    { value: 'default', label: 'Default' },
+    { value: 'large', label: 'Large' }
+  ];
+  permissionsStatus: PermissionsStatus | null = null;
+  isLoadingPermissions = false;
+  isRequestingPermission: string | null = null;
+  permissionsError = '';
+
+  readonly permissions: PermissionItem[] = [
+    { key: 'reminders', label: 'Apple Reminders', description: 'needed for reminder sync' },
+    { key: 'speechRecognition', label: 'Speech Recognition', description: 'needed for Smart Capture' },
+    { key: 'microphone', label: 'Microphone', description: 'needed for Smart Capture' },
+    { key: 'location', label: 'Location', description: 'needed for location-based reminders' },
+  ];
+
+  private visibilityListener: (() => void) | null = null;
+
   constructor(
     private reminderService: ReminderService,
     private notesService: NotesService,
     private route: ActivatedRoute,
     private router: Router,
-    public authService: AuthService
+    public authService: AuthService,
+    private push: PushNotificationService,
+    private preferences: UserPreferencesService
   ) {}
 
   async ngOnInit() {
@@ -90,6 +152,79 @@ export class SettingsComponent implements OnInit {
       history.replaceState({}, '', '/settings');
     }
     await this.loadAll();
+    this.refreshNotificationPermissionState();
+    this.refreshDisplayPreferences();
+
+    if (this.isIos) {
+      await this.loadPermissionsStatus();
+      this.visibilityListener = () => {
+        if (document.visibilityState === 'visible') {
+          this.loadPermissionsStatus();
+        }
+      };
+      document.addEventListener('visibilitychange', this.visibilityListener);
+    }
+  }
+
+  ngOnDestroy() {
+    if (this.visibilityListener) {
+      document.removeEventListener('visibilitychange', this.visibilityListener);
+    }
+  }
+
+  toggleLegacyAndroidSmartCapture(event: Event) {
+    const enabled = (event.target as HTMLInputElement).checked;
+    this.legacyAndroidSmartCaptureEnabled = enabled;
+    setLegacyAndroidSmartCaptureEnabled(enabled);
+    window.dispatchEvent(new CustomEvent('kept-legacy-smart-capture-changed', { detail: { enabled } }));
+  }
+
+  toggleAndroidSmartCapture(event: Event) {
+    const enabled = (event.target as HTMLInputElement).checked;
+    this.androidSmartCaptureEnabled = enabled;
+    setAndroidSmartCaptureEnabled(enabled);
+    window.dispatchEvent(new CustomEvent('kept-smart-capture-changed', { detail: { enabled } }));
+  }
+
+  showNotificationPrompt() {
+    this.push.restoreNotificationPermissionPrompt();
+    this.refreshNotificationPermissionState();
+    window.dispatchEvent(new CustomEvent('kept-notification-permission-reprompt'));
+    this.success = 'Notification prompt restored.';
+  }
+
+  toggleTwentyFourHourTime(event: Event) {
+    this.useTwentyFourHourTime = (event.target as HTMLInputElement).checked;
+    this.preferences.update({ useTwentyFourHourTime: this.useTwentyFourHourTime });
+  }
+
+  toggleMoveCompletedChecklistItems(event: Event) {
+    this.moveCompletedChecklistItemsToBottom = (event.target as HTMLInputElement).checked;
+    this.preferences.update({ moveCompletedChecklistItemsToBottom: this.moveCompletedChecklistItemsToBottom });
+  }
+
+  toggleRichLinkPreviews(event: Event) {
+    this.richLinkPreviews = (event.target as HTMLInputElement).checked;
+    this.preferences.update({ richLinkPreviews: this.richLinkPreviews });
+  }
+
+  setNotePreviewTextSize(size: 'compact' | 'default' | 'large') {
+    this.notePreviewTextSize = size;
+    this.preferences.update({ notePreviewTextSize: size });
+  }
+
+  private refreshNotificationPermissionState() {
+    this.notificationPermissionsVisible = this.push.notificationsSupported();
+    this.notificationPermission = this.push.notificationPermission();
+    this.notificationPromptDismissed = this.push.notificationPermissionPromptDismissed();
+  }
+
+  private refreshDisplayPreferences() {
+    const value = this.preferences.value;
+    this.useTwentyFourHourTime = value.useTwentyFourHourTime;
+    this.moveCompletedChecklistItemsToBottom = value.moveCompletedChecklistItemsToBottom;
+    this.richLinkPreviews = value.richLinkPreviews;
+    this.notePreviewTextSize = value.notePreviewTextSize;
   }
 
   private async loadAll() {
@@ -129,6 +264,67 @@ export class SettingsComponent implements OnInit {
       }
     } catch {}
 
+  }
+
+  // ── iOS Permissions ──────────────────────────────────────────────────────
+
+  private async loadPermissionsStatus() {
+    if (!this.isIos) return;
+    this.isLoadingPermissions = true;
+    this.permissionsError = '';
+    try {
+      const plugin = (window as any).Capacitor?.Plugins?.KeptIntelligence;
+      if (!plugin) {
+        this.permissionsError = 'KeptIntelligence plugin not available.';
+        return;
+      }
+      this.permissionsStatus = await plugin.getPermissionsStatus();
+    } catch (e: any) {
+      this.permissionsError = e?.message || 'Could not load permission statuses.';
+    } finally {
+      this.isLoadingPermissions = false;
+    }
+  }
+
+  async requestPermission(key: string) {
+    if (!this.isIos) return;
+    this.isRequestingPermission = key;
+    this.permissionsError = '';
+    try {
+      const KeptReminders = (window as any).Capacitor?.Plugins?.KeptReminders;
+      const KeptIntelligence = (window as any).Capacitor?.Plugins?.KeptIntelligence;
+
+      switch (key) {
+        case 'reminders':
+          await KeptReminders?.requestAccess();
+          break;
+        case 'speechRecognition':
+          await KeptIntelligence?.requestSpeechAccess();
+          break;
+        case 'microphone':
+          await KeptIntelligence?.requestMicrophoneAccess();
+          break;
+        case 'location':
+          await KeptReminders?.requestLocationAccess();
+          break;
+      }
+    } catch (e: any) {
+      this.permissionsError = e?.message || `Could not request ${key} permission.`;
+    } finally {
+      this.isRequestingPermission = null;
+      // Reload status after request
+      await this.loadPermissionsStatus();
+    }
+  }
+
+  async openAppSettings() {
+    if (!this.isIos) return;
+    try {
+      const plugin = (window as any).Capacitor?.Plugins?.KeptIntelligence;
+      await plugin?.openAppSettings();
+    } catch (e: any) {
+      this.permissionsError = e?.message || 'Could not open app settings.';
+    }
   }
 
   // ── Two-Factor Authentication ────────────────────────────────────────────
@@ -315,7 +511,13 @@ export class SettingsComponent implements OnInit {
       // UI showing pre-import state until the user manually refreshes.
       try { await this.notesService.load(); } catch {}
     } catch (e: any) {
-      this.takeoutError = e?.error?.error || 'Import failed. Make sure you uploaded a Google Takeout ZIP containing a Keep folder.';
+      if (e?.status === 413) {
+        this.takeoutError = e?.error?.error || 'That Takeout ZIP is too large for this server or proxy. Try importing directly over LAN/SSH, or raise your proxy upload limit.';
+      } else if (e?.status === 0) {
+        this.takeoutError = 'Import upload could not reach Kept. Large Takeout ZIPs may be blocked by Cloudflare, Nginx, or another proxy before Kept can read them. Try importing directly over LAN/SSH.';
+      } else {
+        this.takeoutError = e?.error?.error || 'Import failed. If this is a large Takeout ZIP, try importing directly over LAN/SSH or raise your proxy upload limit.';
+      }
     } finally {
       this.isImportingTakeout = false;
       (event.target as HTMLInputElement).value = '';

@@ -24,7 +24,7 @@
       <section class="settings-section takeout-section">
         <div class="section-title">Import from Google Keep</div>
         <p class="section-desc">
-          Import your notes from a Google Takeout export. Colors, images, links, checklists, and labels are preserved where possible.
+          Import your notes from a Google Takeout export. Colors, images, links, checklists, and labels are preserved where possible. Large imports may need a direct LAN/SSH connection if your proxy or CDN limits upload size.
         </p>
 
         <div class="instruction-group">
@@ -38,7 +38,7 @@
               <li>Click <strong>Deselect all</strong>, then scroll down and check only <strong>Keep</strong>.</li>
               <li>Click <strong>Next step</strong>, choose your delivery method (email is easiest), then click <strong>Create export</strong>.</li>
               <li>Google will email you a download link — this usually arrives within a few minutes but can take longer for large exports.</li>
-              <li>Download the ZIP from the email and upload it below.</li>
+              <li>Download the ZIP from the email and upload it below. Kept accepts Takeout ZIPs up to 5 GB by default; for larger self-hosted imports, set <code>KEPT_TAKEOUT_UPLOAD_MAX</code>.</li>
             </ol>
           }
         </div>
@@ -146,6 +146,69 @@
           }
         }
       </section>
+    </div>
+
+    <!-- ── Group: Display & Editing ────────────────────────────────────── -->
+    <div class="settings-group">
+      <h2 class="group-title color-blue">
+        <span class="material-symbols-outlined">tune</span>
+        Display & Editing
+      </h2>
+
+      <p class="section-desc">
+        Adjust how Kept presents times, checklist rows, and links on this device.
+      </p>
+
+      <div class="preferences-list">
+        <div class="preference-row">
+          <div class="preference-info">
+            <span class="preference-label">24-hour time</span>
+            <span class="preference-desc">Show reminder times without AM/PM.</span>
+          </div>
+          <label class="toggle-label">
+            <input type="checkbox" [checked]="useTwentyFourHourTime" (change)="toggleTwentyFourHourTime($event)">
+            <span class="toggle-text">{{useTwentyFourHourTime ? 'Enabled' : 'Disabled'}}</span>
+          </label>
+        </div>
+
+        <div class="preference-row">
+          <div class="preference-info">
+            <span class="preference-label">Move completed checklist items to bottom</span>
+            <span class="preference-desc">Turn off to keep checked items in their manual list order.</span>
+          </div>
+          <label class="toggle-label">
+            <input type="checkbox" [checked]="moveCompletedChecklistItemsToBottom" (change)="toggleMoveCompletedChecklistItems($event)">
+            <span class="toggle-text">{{moveCompletedChecklistItemsToBottom ? 'Enabled' : 'Disabled'}}</span>
+          </label>
+        </div>
+
+        <div class="preference-row">
+          <div class="preference-info">
+            <span class="preference-label">Rich link previews</span>
+            <span class="preference-desc">Turn off to show links as plain text instead of preview cards.</span>
+          </div>
+          <label class="toggle-label">
+            <input type="checkbox" [checked]="richLinkPreviews" (change)="toggleRichLinkPreviews($event)">
+            <span class="toggle-text">{{richLinkPreviews ? 'Enabled' : 'Disabled'}}</span>
+          </label>
+        </div>
+
+        <div class="preference-row">
+          <div class="preference-info">
+            <span class="preference-label">Note preview text size and density</span>
+            <span class="preference-desc">Adjust note card text and density in the overview.</span>
+          </div>
+          <div class="segmented-control" role="group" aria-label="Note preview text size">
+            @for (option of notePreviewTextSizeOptions; track option.value) {
+              <button type="button"
+                [class.active]="notePreviewTextSize === option.value"
+                (click)="setNotePreviewTextSize(option.value)">
+                {{option.label}}
+              </button>
+            }
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- ── Group: Reminders & Calendars ─────────────────────────────────── -->
@@ -349,6 +412,116 @@
       </section>
 
     </div>
+
+    <!-- ── Group: Native App Permissions ──────────────────────────────────────── -->
+    @if (isIos || isAndroid || notificationPermissionsVisible) {
+    <div class="settings-group permissions-group">
+      <h2 class="group-title color-blue">
+        <span class="material-symbols-outlined">security</span>
+        App Permissions
+      </h2>
+
+      <p class="section-desc">
+        Manage the permissions Kept needs for reminders, voice capture, and location-based features.
+      </p>
+
+      @if (notificationPermissionsVisible) {
+        <div class="permissions-list notification-permissions-list">
+          <div class="permission-row">
+            <div class="permission-info">
+              <span class="permission-label">Web notifications</span>
+              <span class="permission-desc">
+                Reminder alerts from this browser. You can dismiss the prompt and show it again here.
+              </span>
+            </div>
+            <div class="permission-action">
+              @if (notificationPermission === 'granted') {
+                <span class="permission-granted">
+                  <span class="material-symbols-outlined check-icon">check_circle</span>
+                  Granted
+                </span>
+              } @else if (notificationPermission === 'denied') {
+                <span class="permission-desc">Blocked in browser</span>
+              } @else {
+                <button type="button" class="btn-secondary btn-permission" (click)="showNotificationPrompt()">
+                  Show prompt
+                </button>
+              }
+            </div>
+          </div>
+        </div>
+      }
+
+      @if (isAndroid) {
+        <div class="permissions-list legacy-smart-capture-list">
+          <div class="permission-row">
+            <div class="permission-info">
+              <span class="permission-label">Smart Capture</span>
+              <span class="permission-desc">Show voice-first Smart Capture and use the private on-device model.</span>
+            </div>
+            <div class="permission-action">
+              <label class="toggle-label">
+                <input type="checkbox" [checked]="androidSmartCaptureEnabled" (change)="toggleAndroidSmartCapture($event)">
+                <span class="toggle-text">{{androidSmartCaptureEnabled ? 'Enabled' : 'Disabled'}}</span>
+              </label>
+            </div>
+          </div>
+          @if (legacyAndroidSmartCaptureVisible) {
+          <div class="permission-row">
+            <div class="permission-info">
+              <span class="permission-label">Legacy device Smart Capture</span>
+              <span class="permission-desc">Enable Smart Capture on Android 12 and older. Voice punctuation and checklist parsing are less reliable on legacy Android speech services.</span>
+            </div>
+            <div class="permission-action">
+              <label class="toggle-label">
+                <input type="checkbox" [checked]="legacyAndroidSmartCaptureEnabled" (change)="toggleLegacyAndroidSmartCapture($event)">
+                <span class="toggle-text">{{legacyAndroidSmartCaptureEnabled ? 'Enabled' : 'Disabled'}}</span>
+              </label>
+            </div>
+          </div>
+          }
+        </div>
+      }
+
+      @if (isIos) {
+        @if (isLoadingPermissions) {
+          <div class="loading-placeholder">Loading permission statuses…</div>
+        } @else if (permissionsError) {
+          <div class="error">{{permissionsError}}</div>
+        } @else if (permissionsStatus) {
+          <div class="permissions-list">
+            @for (perm of permissions; track perm.key) {
+              <div class="permission-row">
+                <div class="permission-info">
+                  <span class="permission-label">{{perm.label}}</span>
+                  <span class="permission-desc">{{perm.description}}</span>
+                </div>
+                <div class="permission-action">
+                  @if (permissionsStatus[perm.key] === 'granted') {
+                    <span class="permission-granted">
+                      <span class="material-symbols-outlined check-icon">check_circle</span>
+                      Granted
+                    </span>
+                  } @else if (permissionsStatus[perm.key] === 'notDetermined') {
+                    <button type="button" class="btn-secondary btn-permission"
+                      [disabled]="isRequestingPermission === perm.key"
+                      (click)="requestPermission(perm.key)">
+                      {{isRequestingPermission === perm.key ? 'Requesting…' : 'Grant Access'}}
+                    </button>
+                  } @else if (permissionsStatus[perm.key] === 'denied') {
+                    <button type="button" class="btn-secondary btn-permission"
+                      (click)="openAppSettings()">
+                      Open Settings
+                    </button>
+                  }
+                </div>
+              </div>
+            }
+          </div>
+        }
+      }
+    </div>
+    }
 
     <!-- ── Group: Advanced ──────────────────────────────────────────────── -->
     <div class="settings-group">

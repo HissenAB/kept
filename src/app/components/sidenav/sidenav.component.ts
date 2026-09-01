@@ -4,6 +4,7 @@ import { SharedService } from 'src/app/services/shared.service';
 import { LabelActionsT } from 'src/app/interfaces/labels';
 import { Router } from '@angular/router';
 import { AuthService } from 'src/app/services/auth.service';
+import { isNativePhonePlatform } from 'src/app/utils/platform';
 
 @Component({
     selector: 'app-sidenav',
@@ -16,9 +17,14 @@ export class NavComponent implements OnInit, AfterViewInit, OnDestroy {
   @ViewChild("modal") modal !: ElementRef<HTMLInputElement>
   @ViewChild("labelInput") labelInput !: ElementRef<HTMLInputElement>
   @ViewChild("labelError") labelError !: ElementRef<HTMLInputElement>
+  @ViewChild("binderModalContainer") binderModalContainer !: ElementRef<HTMLInputElement>
+  @ViewChild("binderModal") binderModal !: ElementRef<HTMLInputElement>
+  @ViewChild("binderInput") binderInput !: ElementRef<HTMLInputElement>
+  @ViewChild("binderError") binderError !: ElementRef<HTMLInputElement>
   @ViewChild('labelsScroll') labelsScroll?: ElementRef<HTMLDivElement>
 
   isMobileOpen = false;
+  readonly nativePhoneDrawer = isNativePhonePlatform();
 
   installHelpOpen = false;
 
@@ -61,16 +67,65 @@ export class NavComponent implements OnInit, AfterViewInit, OnDestroy {
   editLabel(id: number) {
     this.Shared.label.id = id
     let actions: LabelActionsT = {
-      delete: () => {
-        this.Shared.label.db.delete()
-        this.Shared.label.db.updateAllLabels('')
+      delete: async () => {
+        try {
+          await this.Shared.label.db.delete()
+          await this.Shared.label.db.updateAllLabels('')
+          this.labelError.nativeElement.hidden = true
+        } catch {
+          this.labelError.nativeElement.hidden = false
+        }
       },
-      update: (value: string) => {
-        this.Shared.label.db.update({ name: value })
-        this.Shared.label.db.updateAllLabels(value)
+      update: async (value: string) => {
+        try {
+          await this.Shared.label.db.update({ name: value })
+          await this.Shared.label.db.updateAllLabels(value)
+          this.labelError.nativeElement.hidden = true
+        } catch {
+          this.labelError.nativeElement.hidden = false
+        }
       }
     }
     return actions
+  }
+
+  openBinderModal() {
+    this.binderModalContainer.nativeElement.style.display = 'block';
+    document.addEventListener('mousedown', this.binderMouseDownEvent)
+  }
+
+  hideBinderModal() {
+    this.binderModalContainer.nativeElement.style.display = 'none'
+    document.removeEventListener('mousedown', this.binderMouseDownEvent)
+  }
+
+  binderMouseDownEvent = (event: Event) => {
+    let modalEl = this.binderModal.nativeElement
+    if (!(modalEl as any).contains(event.target)) {
+      this.hideBinderModal()
+    }
+  }
+
+  addBinder(el: HTMLInputElement) {
+    if (!el) return
+    const name = el.value.trim()
+    if (!name) return
+    const exists = this.Shared.binder.list.some(binder => binder.name.toLowerCase() === name.toLowerCase())
+    if (exists) {
+      this.binderError.nativeElement.hidden = false
+      el.focus()
+      return
+    }
+    this.Shared.binder.db.add(name)
+      .then(() => { this.binderError.nativeElement.hidden = true; el.value = ''; el.focus() })
+      .catch(() => { this.binderError.nativeElement.hidden = false; el.focus() })
+  }
+
+  editBinder(name: string) {
+    return {
+      delete: () => this.Shared.binder.db.delete(name),
+      update: (value: string) => this.Shared.binder.db.update(name, value)
+    }
   }
 
   compactLabel(name: string) {
@@ -88,17 +143,29 @@ export class NavComponent implements OnInit, AfterViewInit, OnDestroy {
   collapseSideBar() {
     const sidebar = document.querySelector('[sideBar]');
     if (sidebar) {
-      sidebar.classList.toggle('close');
-      this.isMobileOpen = !sidebar.classList.contains('close') && window.innerWidth <= 599;
+      const collapsed = sidebar.classList.toggle('close');
+      this.Shared.sideBarCollapsed.next(collapsed);
+      this.isMobileOpen = !collapsed && this.usesDrawerSidebar();
+    }
+  }
+
+  closeSideBarIfOpen() {
+    if (!this.usesDrawerSidebar()) return
+    const sidebar = document.querySelector('[sideBar]')
+    if (sidebar && !sidebar.classList.contains('close')) {
+      sidebar.classList.add('close')
+      this.isMobileOpen = false
+      this.Shared.sideBarCollapsed.next(true)
     }
   }
 
   onNavItemClick() {
-    if (window.innerWidth > 599) return
+    if (!this.usesDrawerSidebar()) return
     const sidebar = document.querySelector('[sideBar]')
     if (sidebar && !sidebar.classList.contains('close')) {
       sidebar.classList.add('close')
       this.isMobileOpen = false;
+      this.Shared.sideBarCollapsed.next(true)
     }
   }
 
@@ -128,15 +195,16 @@ export class NavComponent implements OnInit, AfterViewInit, OnDestroy {
 
   ngOnInit(): void {
     this.subscriptions.push(
-      this.Shared.closeSideBar.subscribe(x => { if (x) this.collapseSideBar() })
+      this.Shared.closeSideBar.subscribe(x => { if (x) this.collapseSideBar() }),
+      this.Shared.closeSideBarIfOpen.subscribe(x => { if (x) this.closeSideBarIfOpen() })
     );
-    if (window.innerWidth <= 600) {
-      const sidebar = document.querySelector('[sideBar]');
-      if (sidebar && !sidebar.classList.contains('close')) {
-        sidebar.classList.add('close');
-      }
-      this.isMobileOpen = false;
+    const sidebar = document.querySelector('[sideBar]');
+    if (this.usesDrawerSidebar() && sidebar && !sidebar.classList.contains('close')) {
+      sidebar.classList.add('close');
     }
+    const collapsed = !!sidebar?.classList.contains('close');
+    this.Shared.sideBarCollapsed.next(collapsed);
+    this.isMobileOpen = !collapsed && this.usesDrawerSidebar();
   }
 
   ngAfterViewInit() {
@@ -180,5 +248,9 @@ export class NavComponent implements OnInit, AfterViewInit, OnDestroy {
     // 2px tolerance to avoid sub-pixel flicker.
     this.canScrollUp = el.scrollTop > 2;
     this.canScrollDown = el.scrollTop < max - 2;
+  }
+
+  private usesDrawerSidebar() {
+    return this.nativePhoneDrawer || window.innerWidth <= 599;
   }
 }

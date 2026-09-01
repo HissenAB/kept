@@ -1,18 +1,36 @@
 export type ReminderStatus = 'pending' | 'fired' | 'dismissed' | 'snoozed';
+export type ReminderRepeatType = 'none' | 'daily' | 'weekly' | 'monthly' | 'custom_days';
+
+export interface ReminderRepeatRule {
+  type: ReminderRepeatType;
+  intervalDays?: number;
+  moveToTopOnTrigger?: boolean;
+}
 
 export interface ReminderI {
   id: number;
+  syncId?: string;
   noteId: number | null;
   userId: number;
-  dueAtUtc: string;
+  dueAtUtc: string | null;
   timezone: string;
   repeatRule: string | null;
   status: ReminderStatus;
   title: string | null;
   body: string | null;
   imageUrl: string | null;
+  locationName: string | null;
+  savedPlaceId?: number | null;
+  latitude: number | null;
+  longitude: number | null;
+  radiusMeters: number | null;
+  locationTrigger?: 'arrive' | 'leave';
   createdAt: string;
   updatedAt: string;
+  lwwPhysicalMs?: number;
+  lwwLogical?: number;
+  lwwDeviceId?: string;
+  lwwOperationId?: string;
 }
 
 export interface CalDavSettingsI {

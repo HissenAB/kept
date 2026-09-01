@@ -179,11 +179,49 @@
 
     .actions { border-top-color: #3c4043; }
     .actions button {
-        color: #9aa0a6;
-        &:hover { background: rgba(232, 234, 237, 0.04); }
+        color: #e8eaed;
+        &:hover { background: rgba(232, 234, 237, 0.08); }
         &:last-child {
-            color: #8ab4f8;
-            &:hover { background: rgba(138, 180, 248, 0.04); }
+            color: #e8eaed;
+            &:hover { background: rgba(232, 234, 237, 0.08); }
         }
+    }
+}
+
+body:not(.light-theme) .collaboratorMenu {
+    background: #202124;
+    border-color: #5f6368;
+    color: #e8eaed;
+
+    .title,
+    .user-list .share-user .user-name {
+        color: #e8eaed;
+    }
+
+    .hint {
+        color: #bdc1c6;
+    }
+
+    .user-list,
+    .actions {
+        border-color: #3c4043;
+    }
+
+    .user-list .share-user:hover {
+        background: rgba(232, 234, 237, 0.08);
+    }
+
+    .user-list .share-user.readonly:hover {
+        background: transparent;
+    }
+
+    .actions button,
+    .actions button:last-child {
+        color: #e8eaed;
+    }
+
+    .actions button:hover,
+    .actions button:last-child:hover {
+        background: rgba(232, 234, 237, 0.08);
     }
 }

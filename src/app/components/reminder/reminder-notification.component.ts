@@ -36,7 +36,7 @@ export class ReminderNotificationComponent implements OnInit, OnDestroy {
   dismiss() {
     if (!this.notification) return;
     if (this.notification.reminderId > 0) {
-      this.reminderService.update(this.notification.reminderId, { status: 'dismissed' }).catch(console.error);
+      this.reminderService.dismissFiredReminder(this.notification.reminderId).catch(console.error);
     }
     this.notification = null;
   }

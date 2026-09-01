@@ -1,7 +1,7 @@
 @if (isMobileOpen) {
   <div class="sidebar-backdrop" (click)="collapseSideBar()"></div>
 }
-<div sideBar class="main-sidebar">
+<div sideBar class="main-sidebar" [class.native-phone-drawer]="nativePhoneDrawer">
   <div class="sidenav-top">
     <div [class.active]="router.url === '/'" class="item" routerLink="/" (click)="onNavItemClick()">
       <span class="pic lamp" aria-hidden="true"></span>
@@ -19,6 +19,28 @@
       <span class="pic col" aria-hidden="true"></span>
       <span class="text">Shared</span>
     </div>
+  </div>
+
+  <div class="sidenav-labels-header sidenav-binders-header">
+    <span class="material-pic material-symbols-outlined binder-section-icon" aria-hidden="true">folder_open</span>
+    <span class="text">Binders</span>
+    <button type="button" class="edit-labels-btn H" aria-label="Edit binders" title="Edit binders"
+      (click)="openBinderModal()">
+      <span class="material-symbols-outlined">edit</span>
+    </button>
+  </div>
+
+  <div class="sidenav-binders">
+    @for (binder of Shared.binder.list; track binder.name) {
+      <div [class.active]="router.url === '/binder/'+binder.name" class="item is-binder"
+        (click)="onNavItemClick()"
+        [title]="binder.name"
+        [routerLink]="['/binder', binder.name]">
+        <span class="material-pic material-symbols-outlined binder-row-icon" aria-hidden="true">folder</span>
+        <span class="text">{{binder.name}}</span>
+        <span class="label-abbr" aria-hidden="true">{{compactLabel(binder.name)}}</span>
+      </div>
+    }
   </div>
 
   <div class="sidenav-labels-header">
@@ -84,6 +106,40 @@
     <span class="branding-text">Kept</span>
   </div>
 
+</div>
+
+<div #binderModalContainer class="modal-container">
+  <div #binderModal class="modal">
+    <div class="label-modal-main">
+      <div class="header">
+        <p>Edit binders</p>
+        <div class="input-container">
+          <div #binderPlusIcon class="plus-icon H" (click)="binderInput.value=''"></div>
+          <input #binderInput (blur)="binderPlusIcon.classList.toggle('cancel-icon')"
+            (focus)="binderPlusIcon.classList.toggle('cancel-icon')" (keydown.enter)="addBinder(binderInput)"
+            type="text" placeholder="Create new binder" maxlength="50" (input)="''">
+          <div [style.display]="binderInput.value.length ? 'block' : 'none'" class="check-icon H"
+            (click)="addBinder(binderInput)"></div>
+        </div>
+        <div #binderError class="error" hidden>Binder already exists</div>
+      </div>
+      <div class="label-list">
+        @for (binder of Shared.binder.list; track binder.name) {
+          <div class="labels-container">
+            <div #binderIcon class="label-icon H" (click)="editBinder(binder.name).delete()"></div>
+            <input #binderInput2 (focus)="binderIcon.classList.toggle('trash-icon')"
+              (keydown.enter)="binderInput2.blur()"
+              (blur)="editBinder(binder.name).update(binderInput2.value);binderIcon.classList.toggle('trash-icon')"
+              [value]="binder.name" type="text" placeholder="Enter binder name" maxlength="50">
+            <div class="pen-icon H" (click)="editBinder(binder.name).update(binderInput2.value)"></div>
+          </div>
+        }
+      </div>
+      <div class="footer">
+        <div (click)="hideBinderModal()" type="submit" tabindex="0">Done</div>
+      </div>
+    </div>
+  </div>
 </div>
 
 

@@ -15,6 +15,20 @@
   align-self: flex-start;
   z-index: 900;
 
+  @media (min-width: 600px) {
+    flex: 0 0 280px;
+    width: 280px;
+
+    app-sidenav {
+      display: block;
+      left: 0;
+      position: fixed;
+      top: 94px;
+      width: 280px;
+      z-index: 900;
+    }
+  }
+
 
   @media (max-width: 599px) {
     // The mobile drawer is `position: fixed` inside the sidenav itself, so the
@@ -25,8 +39,198 @@
   }
 }
 
+@media (min-width: 600px) {
+  .main-section.sidebar-collapsed .sidenav-sticky {
+    flex-basis: 80px;
+    width: 80px;
+
+    app-sidenav {
+      width: 80px;
+    }
+  }
+}
+
+.main-section.native-phone-layout .sidenav-sticky {
+  flex: 0;
+  position: static;
+  width: 0;
+
+  app-sidenav {
+    position: static;
+    width: 0;
+  }
+}
+
+.main-section.native-phone-layout {
+  .padding {
+    padding: 0 12px;
+  }
+
+  .mobile-compose-fab {
+    align-items: center;
+    background: #feefc3;
+    border: none;
+    border-radius: 16px;
+    bottom: max(24px, calc(env(safe-area-inset-bottom, 0px) + 8px));
+    box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+    color: #3c4043;
+    cursor: pointer;
+    display: inline-flex;
+    height: 56px;
+    justify-content: center;
+    left: auto;
+    position: fixed;
+    right: max(16px, calc(env(safe-area-inset-right, 0px) + 8px));
+    transition: transform 0.2s, box-shadow 0.2s;
+    width: 56px;
+    z-index: 1400;
+
+    &:active {
+      transform: scale(0.95);
+    }
+
+    .material-symbols-outlined {
+      font-size: 28px;
+      line-height: 1;
+    }
+  }
+
+  .desktop-placeholder-input {
+    display: none;
+
+    &.mobile-active {
+      background: #202124;
+      display: block;
+      height: 100dvh;
+      left: 0;
+      margin: 0;
+      position: fixed;
+      top: 0;
+      width: 100%;
+      z-index: 1500;
+    }
+  }
+}
+
+:host-context(.light-theme) .main-section.native-phone-layout .mobile-compose-fab {
+  background: #fff;
+  box-shadow: 0 1px 3px 0 rgba(60,64,67,0.302), 0 4px 8px 3px rgba(60,64,67,0.149);
+  color: #1a73e8;
+}
+
 .mobile-compose-fab {
   display: none;
+}
+
+.offline-sync-state {
+  align-items: center;
+  background: #fff8df;
+  border: 1px solid #fdd663;
+  border-radius: 999px;
+  box-shadow: 0 8px 24px rgba(60,64,67,0.16);
+  color: #3c4043;
+  display: inline-flex;
+  font: 700 13px/1 "Google Sans", Roboto, Arial, sans-serif;
+  gap: 6px;
+  left: 50%;
+  padding: 8px 12px;
+  position: fixed;
+  top: 108px;
+  transform: translateX(-50%);
+  z-index: 1500;
+
+  .material-symbols-outlined {
+    font-size: 18px;
+  }
+
+  &.is-error {
+    background: #fce8e6;
+    border-color: #f6aea9;
+    color: #b3261e;
+  }
+}
+
+.mobile-compose-fab,
+.smart-capture-fab {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  -webkit-user-drag: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+  user-select: none;
+}
+
+.smart-gemma-prompt {
+  background: #fff8df;
+  border: 1px solid #fdd663;
+  border-radius: 18px;
+  bottom: 92px;
+  box-shadow: 0 10px 28px rgba(60,64,67,0.18);
+  color: #202124;
+  display: grid;
+  gap: 8px;
+  max-width: min(340px, calc(100vw - 32px));
+  padding: 10px;
+  position: fixed;
+  right: 16px;
+  z-index: 1400;
+}
+
+.smart-gemma-main {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 42px minmax(0, 1fr);
+  padding: 0;
+  text-align: left;
+
+  > .material-symbols-outlined {
+    align-items: center;
+    background: rgba(251, 188, 4, 0.2);
+    border-radius: 14px;
+    color: #1a73e8;
+    display: inline-flex;
+    height: 42px;
+    justify-content: center;
+    width: 42px;
+  }
+
+  span:last-child {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  strong {
+    font: 800 15px/1.1 "Google Sans", Roboto, Arial, sans-serif;
+  }
+
+  small {
+    color: #5f6368;
+    font: 600 12px/1.25 "Google Sans", Roboto, Arial, sans-serif;
+  }
+
+  .smart-gemma-action {
+    color: #1a73e8;
+    font-weight: 800;
+  }
+
+  &:disabled {
+    cursor: wait;
+    opacity: 0.72;
+  }
+}
+
+.smart-gemma-error {
+  background: rgba(246, 174, 169, 0.24);
+  border-radius: 10px;
+  color: #b3261e;
+  font: 700 12px/1.25 "Google Sans", Roboto, Arial, sans-serif;
+  padding: 8px 10px;
 }
 
 .smart-capture-fab {
@@ -507,6 +711,35 @@
     border-color: rgba(126, 87, 194, 0.45);
   }
 
+  &.is-dark-bg {
+    border-color: rgba(255, 255, 255, 0.34);
+    color: #e8eaed;
+
+    .smart-proposal-topline .material-symbols-outlined {
+      color: rgba(232, 234, 237, 0.78);
+    }
+
+    .smart-proposal-badge {
+      background: rgba(255, 255, 255, 0.18);
+      color: #fff;
+    }
+
+    .smart-proposal-checklist .material-symbols-outlined {
+      color: rgba(138, 180, 248, 0.78);
+    }
+
+    .smart-proposal-meta,
+    .smart-share-heading {
+      border-color: rgba(255, 255, 255, 0.2);
+      color: rgba(232, 234, 237, 0.78);
+    }
+
+    .smart-share-block,
+    .smart-reminder-block {
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+  }
+
   h3 {
     font-size: 19px;
     font-weight: 700;
@@ -732,6 +965,59 @@
   }
 
   > span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.smart-reminder-block {
+  border-top: 1px solid rgba(60, 64, 67, 0.16);
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 14px;
+  position: relative;
+}
+
+.smart-reminder-attached {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(60, 64, 67, 0.18);
+  border-radius: 16px;
+  box-shadow: 0 10px 24px rgba(60, 64, 67, 0.1);
+  color: #202124;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  min-height: 58px;
+  padding: 8px 10px;
+
+  > .material-symbols-outlined {
+    align-items: center;
+    background: rgba(251, 188, 4, 0.18);
+    border-radius: 14px;
+    color: #b06000;
+    display: inline-flex;
+    font-size: 24px;
+    height: 42px;
+    justify-content: center;
+    width: 42px;
+  }
+
+  > div {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  strong {
+    font: 800 14px/1.1 "Google Sans", Roboto, Arial, sans-serif;
+  }
+
+  span:not(.material-symbols-outlined) {
+    color: rgba(60, 64, 67, 0.72);
+    font: 700 13px/1.2 "Google Sans", Roboto, Arial, sans-serif;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

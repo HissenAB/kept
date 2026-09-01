@@ -16,11 +16,13 @@ const qrcode = require('qrcode');
 
 const app = express();
 app.set('trust proxy', 1);
+app.disable('etag');
 const server = http.createServer(app);
 const port = Number(process.env.PORT || 3000);
 const dataDir = path.join(__dirname, '..', 'data');
 const uploadDir = path.join(dataDir, 'uploads');
 const attachmentDir = path.join(dataDir, 'attachments');
+const takeoutTmpDir = path.join(dataDir, 'imports', 'tmp');
 const dbPath = process.env.SQLITE_PATH || path.join(dataDir, 'kept.sqlite');
 const vapidPath = path.join(dataDir, 'vapid.json');
 const staticDir = path.join(__dirname, '..', 'dist', 'keep');
@@ -28,6 +30,7 @@ const staticDir = path.join(__dirname, '..', 'dist', 'keep');
 fs.mkdirSync(dataDir, { recursive: true });
 fs.mkdirSync(uploadDir, { recursive: true });
 fs.mkdirSync(attachmentDir, { recursive: true });
+fs.mkdirSync(takeoutTmpDir, { recursive: true });
 
 const KEPT_VERSION = (() => {
   try {
@@ -430,6 +433,10 @@ async function init() {
       images TEXT NOT NULL DEFAULT '[]',
       isCbox INTEGER NOT NULL DEFAULT 0,
       labels TEXT NOT NULL DEFAULT '[]',
+      binder TEXT NOT NULL DEFAULT '',
+      locked INTEGER NOT NULL DEFAULT 0,
+      lockSalt TEXT NOT NULL DEFAULT '',
+      lockHash TEXT NOT NULL DEFAULT '',
       archived INTEGER NOT NULL DEFAULT 0,
       trashed INTEGER NOT NULL DEFAULT 0,
       sortOrder REAL NOT NULL DEFAULT 0,
@@ -458,12 +465,51 @@ async function init() {
   if (!noteColumns.some(column => column.name === 'sortOrder')) {
     await run(`ALTER TABLE notes ADD COLUMN sortOrder REAL NOT NULL DEFAULT 0`);
   }
+  if (!noteColumns.some(column => column.name === 'syncId')) {
+    await run(`ALTER TABLE notes ADD COLUMN syncId TEXT`);
+  }
+  if (!noteColumns.some(column => column.name === 'lwwPhysicalMs')) {
+    await run(`ALTER TABLE notes ADD COLUMN lwwPhysicalMs INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!noteColumns.some(column => column.name === 'lwwLogical')) {
+    await run(`ALTER TABLE notes ADD COLUMN lwwLogical INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!noteColumns.some(column => column.name === 'lwwDeviceId')) {
+    await run(`ALTER TABLE notes ADD COLUMN lwwDeviceId TEXT NOT NULL DEFAULT 'server'`);
+  }
+  if (!noteColumns.some(column => column.name === 'lwwOperationId')) {
+    await run(`ALTER TABLE notes ADD COLUMN lwwOperationId TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!noteColumns.some(column => column.name === 'binder')) {
+    await run(`ALTER TABLE notes ADD COLUMN binder TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!noteColumns.some(column => column.name === 'locked')) {
+    await run(`ALTER TABLE notes ADD COLUMN locked INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!noteColumns.some(column => column.name === 'lockSalt')) {
+    await run(`ALTER TABLE notes ADD COLUMN lockSalt TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!noteColumns.some(column => column.name === 'lockHash')) {
+    await run(`ALTER TABLE notes ADD COLUMN lockHash TEXT NOT NULL DEFAULT ''`);
+  }
   await run('UPDATE notes SET sortOrder = id WHERE sortOrder = 0 OR sortOrder IS NULL');
+  const notesWithoutSyncIds = await all(`SELECT id FROM notes WHERE syncId IS NULL OR syncId = ''`);
+  for (const note of notesWithoutSyncIds) {
+    await run(
+      `UPDATE notes
+       SET syncId = ?, lwwPhysicalMs = CASE WHEN lwwPhysicalMs = 0 THEN ? ELSE lwwPhysicalMs END,
+           lwwOperationId = CASE WHEN lwwOperationId = '' THEN ? ELSE lwwOperationId END
+       WHERE id = ?`,
+      [`note-${crypto.randomUUID()}`, Date.now(), crypto.randomUUID(), note.id]
+    );
+  }
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS notes_sync_id_unique ON notes(syncId)`);
   const firstUser = await get('SELECT id FROM users ORDER BY role = "admin" DESC, id LIMIT 1');
   if (firstUser) {
     await run('UPDATE notes SET ownerUserId = ? WHERE ownerUserId IS NULL', [firstUser.id]);
     await run('UPDATE labels SET userId = ? WHERE userId IS NULL', [firstUser.id]);
   }
+  await run('UPDATE notes SET lastEditorUserId = ownerUserId WHERE lastEditorUserId IS NULL AND ownerUserId IS NOT NULL');
   await run('CREATE UNIQUE INDEX IF NOT EXISTS labels_user_name_unique ON labels(userId, name)');
   await run(`
     CREATE TABLE IF NOT EXISTS note_images (
@@ -512,15 +558,20 @@ async function init() {
   await run(`
     CREATE TABLE IF NOT EXISTS reminders (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      noteId INTEGER REFERENCES notes(id) ON DELETE CASCADE,
+      noteId INTEGER UNIQUE REFERENCES notes(id) ON DELETE CASCADE,
       userId INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      dueAtUtc TEXT NOT NULL,
+      dueAtUtc TEXT,
       timezone TEXT NOT NULL DEFAULT 'UTC',
       repeatRule TEXT,
       status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','fired','dismissed','snoozed')),
       title TEXT,
       body TEXT,
       imageUrl TEXT,
+      locationName TEXT,
+      latitude REAL,
+      longitude REAL,
+      radiusMeters REAL DEFAULT 120,
+      locationTrigger TEXT NOT NULL DEFAULT 'arrive' CHECK(locationTrigger IN ('arrive','leave')),
       createdAt TEXT NOT NULL,
       updatedAt TEXT NOT NULL
     )
@@ -532,8 +583,66 @@ async function init() {
   if (!reminderColumns.some(column => column.name === 'gcalEventId')) {
     await run(`ALTER TABLE reminders ADD COLUMN gcalEventId TEXT`);
   }
+  if (!reminderColumns.some(column => column.name === 'locationName')) {
+    await run(`ALTER TABLE reminders ADD COLUMN locationName TEXT`);
+  }
+  if (!reminderColumns.some(column => column.name === 'latitude')) {
+    await run(`ALTER TABLE reminders ADD COLUMN latitude REAL`);
+  }
+  if (!reminderColumns.some(column => column.name === 'longitude')) {
+    await run(`ALTER TABLE reminders ADD COLUMN longitude REAL`);
+  }
+  if (!reminderColumns.some(column => column.name === 'radiusMeters')) {
+    await run(`ALTER TABLE reminders ADD COLUMN radiusMeters REAL DEFAULT 120`);
+  }
+  if (!reminderColumns.some(column => column.name === 'locationTrigger')) {
+    await run(`ALTER TABLE reminders ADD COLUMN locationTrigger TEXT NOT NULL DEFAULT 'arrive'`);
+  }
+  if (!reminderColumns.some(column => column.name === 'syncId')) {
+    await run(`ALTER TABLE reminders ADD COLUMN syncId TEXT`);
+  }
+  if (!reminderColumns.some(column => column.name === 'lwwPhysicalMs')) {
+    await run(`ALTER TABLE reminders ADD COLUMN lwwPhysicalMs INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!reminderColumns.some(column => column.name === 'lwwLogical')) {
+    await run(`ALTER TABLE reminders ADD COLUMN lwwLogical INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!reminderColumns.some(column => column.name === 'lwwDeviceId')) {
+    await run(`ALTER TABLE reminders ADD COLUMN lwwDeviceId TEXT NOT NULL DEFAULT 'server'`);
+  }
+  if (!reminderColumns.some(column => column.name === 'lwwOperationId')) {
+    await run(`ALTER TABLE reminders ADD COLUMN lwwOperationId TEXT NOT NULL DEFAULT ''`);
+  }
+  const remindersWithoutSyncIds = await all(`SELECT id FROM reminders WHERE syncId IS NULL OR syncId = ''`);
+  for (const reminder of remindersWithoutSyncIds) {
+    await run(
+      `UPDATE reminders
+       SET syncId = ?, lwwPhysicalMs = CASE WHEN lwwPhysicalMs = 0 THEN ? ELSE lwwPhysicalMs END,
+           lwwOperationId = CASE WHEN lwwOperationId = '' THEN ? ELSE lwwOperationId END
+       WHERE id = ?`,
+      [`reminder-${crypto.randomUUID()}`, Date.now(), crypto.randomUUID(), reminder.id]
+    );
+  }
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS reminders_sync_id_unique ON reminders(syncId)`);
   await run(`CREATE INDEX IF NOT EXISTS reminders_user_idx ON reminders(userId)`);
   await run(`CREATE INDEX IF NOT EXISTS reminders_due_idx ON reminders(dueAtUtc, status)`);
+  await run(`
+    CREATE TABLE IF NOT EXISTS location_saved_places (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      userId INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      address TEXT,
+      placeType TEXT NOT NULL DEFAULT 'other' CHECK(placeType IN ('home','work','gym','other')),
+      latitude REAL NOT NULL,
+      longitude REAL NOT NULL,
+      radiusMeters REAL NOT NULL DEFAULT 100,
+      locationTrigger TEXT NOT NULL DEFAULT 'arrive' CHECK(locationTrigger IN ('arrive','leave')),
+      mapPreviewUrl TEXT,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS location_saved_places_user_idx ON location_saved_places(userId, updatedAt)`);
   // Performance indexes for the /api/notes query, which JOINs by note id and
   // filters by ownerUserId. Without these, listing all notes degrades to
   // O(n*m) scans once the user has hundreds of notes (visible after a takeout
@@ -545,14 +654,63 @@ async function init() {
     CREATE TABLE IF NOT EXISTS note_attachments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       noteId INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+      syncId TEXT,
       originalName TEXT NOT NULL,
       storedFilename TEXT NOT NULL UNIQUE,
       fileSize INTEGER NOT NULL,
       mimeType TEXT NOT NULL,
-      uploadedAt TEXT NOT NULL
+      uploadedAt TEXT NOT NULL,
+      lwwPhysicalMs INTEGER NOT NULL DEFAULT 0,
+      lwwLogical INTEGER NOT NULL DEFAULT 0,
+      lwwDeviceId TEXT NOT NULL DEFAULT 'server',
+      lwwOperationId TEXT NOT NULL DEFAULT ''
     )
   `);
+  const attachmentColumns = await all('PRAGMA table_info(note_attachments)');
+  if (!attachmentColumns.some(column => column.name === 'syncId')) {
+    await run(`ALTER TABLE note_attachments ADD COLUMN syncId TEXT`);
+  }
+  if (!attachmentColumns.some(column => column.name === 'lwwPhysicalMs')) {
+    await run(`ALTER TABLE note_attachments ADD COLUMN lwwPhysicalMs INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!attachmentColumns.some(column => column.name === 'lwwLogical')) {
+    await run(`ALTER TABLE note_attachments ADD COLUMN lwwLogical INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!attachmentColumns.some(column => column.name === 'lwwDeviceId')) {
+    await run(`ALTER TABLE note_attachments ADD COLUMN lwwDeviceId TEXT NOT NULL DEFAULT 'server'`);
+  }
+  if (!attachmentColumns.some(column => column.name === 'lwwOperationId')) {
+    await run(`ALTER TABLE note_attachments ADD COLUMN lwwOperationId TEXT NOT NULL DEFAULT ''`);
+  }
+  const attachmentsWithoutSyncIds = await all(`SELECT id FROM note_attachments WHERE syncId IS NULL OR syncId = ''`);
+  for (const attachment of attachmentsWithoutSyncIds) {
+    await run(
+      `UPDATE note_attachments
+       SET syncId = ?, lwwPhysicalMs = CASE WHEN lwwPhysicalMs = 0 THEN ? ELSE lwwPhysicalMs END,
+           lwwOperationId = CASE WHEN lwwOperationId = '' THEN ? ELSE lwwOperationId END
+       WHERE id = ?`,
+      [`attachment-${crypto.randomUUID()}`, Date.now(), crypto.randomUUID(), attachment.id]
+    );
+  }
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS note_attachments_sync_id_unique ON note_attachments(syncId)`);
   await run(`CREATE INDEX IF NOT EXISTS note_attachments_note_idx ON note_attachments(noteId)`);
+  await run(`
+    CREATE TABLE IF NOT EXISTS sync_changes (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      userId INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      resourceType TEXT NOT NULL CHECK(resourceType IN ('note','reminder','attachment')),
+      resourceSyncId TEXT NOT NULL,
+      operation TEXT NOT NULL CHECK(operation IN ('upsert','delete')),
+      payload TEXT,
+      lwwPhysicalMs INTEGER NOT NULL,
+      lwwLogical INTEGER NOT NULL DEFAULT 0,
+      lwwDeviceId TEXT NOT NULL,
+      lwwOperationId TEXT NOT NULL,
+      changedAt TEXT NOT NULL
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS sync_changes_user_sequence_idx ON sync_changes(userId, sequence)`);
+  await backfillImportedNoteLabels();
   await run(`
     CREATE TABLE IF NOT EXISTS note_collaborator_rejoin_grants (
       noteId INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
@@ -857,10 +1015,15 @@ function canonicalizeNoteImages(images) {
 }
 
 function canonicalizeNotePayload(payload) {
+  const locked = !!payload.locked && !!payload.lockSalt && !!payload.lockHash;
   return {
     ...payload,
     noteBody: canonicalizeNoteHtmlImages(payload.noteBody || ''),
-    images: canonicalizeNoteImages(payload.images || [])
+    images: canonicalizeNoteImages(payload.images || []),
+    binder: String(payload.binder || '').trim().slice(0, 80),
+    locked,
+    lockSalt: locked ? String(payload.lockSalt || '').slice(0, 256) : '',
+    lockHash: locked ? String(payload.lockHash || '').slice(0, 512) : ''
   };
 }
 
@@ -891,6 +1054,7 @@ function dbNoteToApi(row) {
   const pinned = row.userPinned !== undefined ? row.userPinned : row.pinned;
   return {
     id: row.id,
+    syncId: row.syncId,
     ownerUserId: row.ownerUserId,
     noteTitle: row.noteTitle,
     noteBody: row.noteBody || '',
@@ -901,12 +1065,20 @@ function dbNoteToApi(row) {
     images: parseJson(row.images || '[]', []),
     isCbox: Boolean(row.isCbox),
     labels: parseJson(row.labels, []),
+    binder: row.binder || '',
+    locked: Boolean(row.locked),
+    lockSalt: row.lockSalt || '',
+    lockHash: row.lockHash || '',
     archived: Boolean(row.archived),
     trashed: Boolean(row.trashed),
     trashedAt: row.trashedAt || '',
     sortOrder: Number(row.effectiveSortOrder || row.sortOrder || row.id || 0),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    lwwPhysicalMs: Number(row.lwwPhysicalMs || 0),
+    lwwLogical: Number(row.lwwLogical || 0),
+    lwwDeviceId: row.lwwDeviceId || 'server',
+    lwwOperationId: row.lwwOperationId || '',
     collaborators: parseJson(row.collaborators || '[]', []),
     ownerDisplayName: row.ownerDisplayName || undefined,
     ownerUsername: row.ownerUsername || undefined,
@@ -916,6 +1088,106 @@ function dbNoteToApi(row) {
     lastEditorDisplayName: row.lastEditorDisplayName || undefined,
     isDemo: Boolean(row.isDemo)
   };
+}
+
+function serverLwwStamp() {
+  return {
+    physicalMs: Date.now(),
+    logical: 0,
+    deviceId: 'server',
+    operationId: crypto.randomUUID()
+  };
+}
+
+function normalizeLwwStamp(value = {}) {
+  const now = Date.now();
+  const requested = Number(value.physicalMs || value.lwwPhysicalMs || now);
+  const fiveMinutes = 5 * 60 * 1000;
+  return {
+    physicalMs: Math.max(now - fiveMinutes, Math.min(now + fiveMinutes, Number.isFinite(requested) ? requested : now)),
+    logical: Math.max(0, Math.floor(Number(value.logical ?? value.lwwLogical ?? 0) || 0)),
+    deviceId: String(value.deviceId || value.lwwDeviceId || 'unknown').slice(0, 160),
+    operationId: String(value.operationId || value.lwwOperationId || crypto.randomUUID()).slice(0, 160)
+  };
+}
+
+function rowLwwStamp(row = {}) {
+  return {
+    physicalMs: Number(row.lwwPhysicalMs || 0),
+    logical: Number(row.lwwLogical || 0),
+    deviceId: String(row.lwwDeviceId || ''),
+    operationId: String(row.lwwOperationId || '')
+  };
+}
+
+function compareLwwStamp(left, right) {
+  const keys = ['physicalMs', 'logical'];
+  for (const key of keys) {
+    const delta = Number(left[key] || 0) - Number(right[key] || 0);
+    if (delta) return delta;
+  }
+  const device = String(left.deviceId || '').localeCompare(String(right.deviceId || ''));
+  if (device) return device;
+  return String(left.operationId || '').localeCompare(String(right.operationId || ''));
+}
+
+async function appendSyncChange(userIds, resourceType, resourceSyncId, operation, payload, stamp) {
+  const changedAt = new Date().toISOString();
+  for (const userId of [...new Set((userIds || []).map(Number).filter(Boolean))]) {
+    await run(
+      `INSERT INTO sync_changes
+       (userId, resourceType, resourceSyncId, operation, payload, lwwPhysicalMs, lwwLogical, lwwDeviceId, lwwOperationId, changedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        userId,
+        resourceType,
+        resourceSyncId,
+        operation,
+        payload == null ? null : JSON.stringify(payload),
+        stamp.physicalMs,
+        stamp.logical,
+        stamp.deviceId,
+        stamp.operationId,
+        changedAt
+      ]
+    );
+  }
+}
+
+async function noteSyncSnapshot(noteId, userId) {
+  const row = await getAccessibleNote(noteId, userId);
+  if (!row) return null;
+  row.collaboratorIds = (await all('SELECT userId FROM note_collaborators WHERE noteId = ?', [noteId]))
+    .map(item => item.userId)
+    .filter(Boolean)
+    .join(',');
+  await hydrateNoteUserFields([row], userId);
+  const note = dbNoteToApi(row);
+  const attachments = await all(
+    `SELECT id, syncId, originalName, fileSize, mimeType, uploadedAt,
+            lwwPhysicalMs, lwwLogical, lwwDeviceId, lwwOperationId
+     FROM note_attachments WHERE noteId = ? ORDER BY uploadedAt DESC`,
+    [noteId]
+  );
+  note.attachments = attachments;
+  return note;
+}
+
+async function recordNoteSyncChange(noteId, operation, recipientIds, deletedSnapshot) {
+  const recipients = recipientIds || await getNoteRecipientIds(noteId);
+  if (operation === 'upsert') {
+    for (const userId of recipients) {
+      const payload = await noteSyncSnapshot(noteId, userId);
+      if (!payload?.syncId) continue;
+      await appendSyncChange([userId], 'note', payload.syncId, operation, payload, rowLwwStamp(payload));
+    }
+    return;
+  }
+  const payload = deletedSnapshot || null;
+  const syncId = deletedSnapshot?.syncId;
+  const stamp = deletedSnapshot ? rowLwwStamp(deletedSnapshot) : null;
+  if (!syncId || !stamp) return;
+  await appendSyncChange(recipients, 'note', syncId, operation, payload, stamp);
 }
 
 function notePreviewText(row) {
@@ -967,6 +1239,57 @@ function searchTokensFromQuery(query) {
     .filter(Boolean);
 }
 
+function searchOperatorsFromQuery(query) {
+  const operators = {
+    hasImage: false,
+    hasCheckbox: false,
+    hasDrawing: false,
+    hasAnyLabel: false,
+    hasUrl: false,
+    hasAttachment: false,
+    labels: []
+  };
+  for (const token of String(query || '').toLowerCase().split(/\s+/).filter(Boolean)) {
+    if (/^!i(?:m(?:a(?:g(?:e)?)?)?)?$/.test(token)) operators.hasImage = true;
+    else if (/^!t(?:o(?:d(?:o)?)?)?$/.test(token)) operators.hasCheckbox = true;
+    else if (/^!d(?:r(?:a(?:w(?:ing)?)?)?)?$/.test(token)) operators.hasDrawing = true;
+    else if (/^!url?$/.test(token)) operators.hasUrl = true;
+    else if (/^!a(?:t(?:t(?:a(?:c(?:h(?:m(?:e(?:n(?:t)?)?)?)?)?)?)?)?)?$/.test(token)) operators.hasAttachment = true;
+    else if (/^!label:[a-z0-9_-]+$/.test(token)) operators.labels.push(token.slice('!label:'.length));
+    else if (/^!l(?:a(?:b(?:e(?:l)?)?)?)?$/.test(token)) operators.hasAnyLabel = true;
+  }
+  return operators;
+}
+
+function noteOperatorWhere(operators) {
+  const clauses = [];
+  const params = [];
+  if (operators.hasImage) {
+    clauses.push(`(
+      COALESCE(bgImage, '') <> ''
+      OR LOWER(COALESCE(noteBody, '')) LIKE '%<img%'
+      OR (COALESCE(images, '') <> '' AND COALESCE(images, '') <> '[]' AND LOWER(COALESCE(images, '')) NOT LIKE '%"id":"drawing"%')
+    `);
+  }
+  if (operators.hasCheckbox) clauses.push(`(isCbox = 1 OR (COALESCE(checkBoxes, '') <> '' AND COALESCE(checkBoxes, '') <> '[]'))`);
+  if (operators.hasDrawing) clauses.push(`LOWER(COALESCE(images, '')) LIKE '%"id":"drawing"%'`);
+  if (operators.hasAnyLabel) clauses.push(`COALESCE(labels, '') <> '' AND COALESCE(labels, '') <> '[]'`);
+  if (operators.hasUrl) {
+    clauses.push(`(
+      LOWER(COALESCE(noteTitle, '')) LIKE '%http://%'
+      OR LOWER(COALESCE(noteTitle, '')) LIKE '%https://%'
+      OR LOWER(COALESCE(noteBody, '')) LIKE '%http://%'
+      OR LOWER(COALESCE(noteBody, '')) LIKE '%https://%'
+    )`);
+  }
+  if (operators.hasAttachment) clauses.push(`attachmentCount > 0`);
+  for (const label of operators.labels) {
+    clauses.push(`LOWER(REPLACE(COALESCE(labels, ''), ' ', '-')) LIKE ?`);
+    params.push(`%${label}%`);
+  }
+  return { clauses, params };
+}
+
 function noteSearchWhere(tokens) {
   const params = [];
   const conditions = tokens.map(token => {
@@ -994,49 +1317,62 @@ function cardNoteBody(row, previewText) {
   const body = row.noteBody || '';
   if (/<img\b/i.test(body)) return body;
   if (row.isCbox && !plainText(body).trim()) return '';
+  if (body.length <= 12000) return body;
   return escapeHtml(previewText);
 }
 
 function cardSearchText(row) {
+  if (row.locked) return [row.noteTitle || '', row.labels || '', row.binder || ''].join(' ');
   return [
     row.noteTitle || '',
     row.noteBody || '',
     row.checkBoxes || '',
     row.labels || '',
+    row.binder || '',
     row.attachmentNames || ''
   ].join(' ');
 }
 
 function dbNoteToCard(row, options = {}) {
   const includeSearchText = !!options.includeSearchText;
+  const locked = Boolean(row.locked);
   const pinned = row.userPinned !== undefined ? row.userPinned : row.pinned;
   const labels = parseJson(row.labels || '[]', []);
   const checkBoxes = parseJson(row.checkBoxes || '[]', []);
   const parsedImages = parseJson(row.images || '[]', []);
   const images = Array.isArray(parsedImages) ? parsedImages.filter(Boolean) : [];
-  const previewText = notePreviewText(row);
+  const previewText = locked ? '' : notePreviewText(row);
   return {
     id: row.id,
+    syncId: row.syncId,
     ownerUserId: row.ownerUserId,
     noteTitle: row.noteTitle,
-    noteBody: cardNoteBody(row, previewText),
+    noteBody: locked ? '' : cardNoteBody(row, previewText),
     searchText: includeSearchText ? cardSearchText(row) : undefined,
     previewText,
-    linkCount: noteLinkCount(row),
+    linkCount: locked ? 0 : noteLinkCount(row),
     pinned: Boolean(pinned),
     bgColor: row.bgColor || '',
     bgImage: row.bgImage || '',
-    checkBoxes: Array.isArray(checkBoxes) ? checkBoxes.slice(0, 8) : [],
-    images,
+    checkBoxes: locked ? [] : (Array.isArray(checkBoxes) ? checkBoxes.slice(0, 8) : []),
+    images: locked ? [] : images,
     hasMoreImages: false,
     isCbox: Boolean(row.isCbox),
     labels,
+    binder: row.binder || '',
+    locked,
+    lockSalt: row.lockSalt || '',
+    lockHash: row.lockHash || '',
     archived: Boolean(row.archived),
     trashed: Boolean(row.trashed),
     trashedAt: row.trashedAt || '',
     sortOrder: Number(row.effectiveSortOrder || row.sortOrder || row.id || 0),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    lwwPhysicalMs: Number(row.lwwPhysicalMs || 0),
+    lwwLogical: Number(row.lwwLogical || 0),
+    lwwDeviceId: row.lwwDeviceId || 'server',
+    lwwOperationId: row.lwwOperationId || '',
     attachments: [],
     hasAttachments: Number(row.attachmentCount || 0) > 0,
     attachmentCount: Number(row.attachmentCount || 0),
@@ -1053,6 +1389,7 @@ function dbNoteToCard(row, options = {}) {
 }
 
 function noteSummaryFromRow(row) {
+  const locked = Boolean(row.locked);
   const checkBoxes = parseJson(row.checkBoxes || '[]', []);
   const labels = parseJson(row.labels || '[]', []);
   const collaboratorIds = row.collaboratorIds
@@ -1063,10 +1400,14 @@ function noteSummaryFromRow(row) {
   return {
     id: row.id,
     title: row.noteTitle || '',
-    bodyPreview: notePreviewText(row),
+    bodyPreview: locked ? '' : notePreviewText(row),
     type: hasDrawing ? 'drawing' : (row.isCbox || hasChecklist ? 'todo' : 'text'),
     labels,
-    checklistPreview: hasChecklist ? checkBoxes.slice(0, 6).map(item => ({
+    binder: row.binder || '',
+    locked: Boolean(row.locked),
+    lockSalt: row.lockSalt || '',
+    lockHash: row.lockHash || '',
+    checklistPreview: !locked && hasChecklist ? checkBoxes.slice(0, 6).map(item => ({
       id: item.id,
       data: plainText(item.data || ''),
       done: !!item.done
@@ -1204,15 +1545,65 @@ function normalizeAction(action) {
   if (action.dueAtUtc || action.dueAt || action.datetime || action.dateTime) {
     normalized.dueAtUtc = String(action.dueAtUtc || action.dueAt || action.datetime || action.dateTime);
   }
+  const location = action.location && typeof action.location === 'object' ? action.location : {};
+  const locationName = firstDefined(action.locationName, action.location_name, action.triggerLocationName, location.displayName, location.name, location.address);
+  const latitude = firstDefined(action.latitude, action.lat, location.latitude, location.lat);
+  const longitude = firstDefined(action.longitude, action.lng, action.lon, location.longitude, location.lng, location.lon);
+  const radiusMeters = firstDefined(action.radiusMeters, action.radius_meters, action.radius, location.radiusMeters, location.radius_meters, location.radius);
+  const locationTrigger = firstDefined(action.locationTrigger, action.location_trigger, action.triggerType, location.locationTrigger, location.triggerType);
+  if (locationName) normalized.locationName = String(locationName);
+  if (latitude != null) normalized.latitude = Number(latitude);
+  if (longitude != null) normalized.longitude = Number(longitude);
+  if (radiusMeters != null) normalized.radiusMeters = Number(radiusMeters);
+  if (locationTrigger) normalized.locationTrigger = normalizeLocationTrigger(locationTrigger);
   if (action.timezone) normalized.timezone = String(action.timezone);
   if (action.repeatRule) normalized.repeatRule = String(action.repeatRule);
   if (action.createMissingLabels !== undefined) normalized.createMissingLabels = !!action.createMissingLabels;
   return normalized;
 }
 
-function normalizeActionPlan(actionPlan) {
+function isLocationReminderAction(action) {
+  return action?.latitude != null
+    && action?.longitude != null
+    && action?.locationName
+    && action?.locationTrigger;
+}
+
+function reminderNoteTextFromTranscript(transcript) {
+  return String(transcript || '')
+    .replace(/\b(can you|please|could you)\b/gi, ' ')
+    .replace(/\b(remind me|reminder|set a reminder|create a reminder)\b/gi, ' ')
+    .replace(/\b(today|tomorrow|tonight|this evening|this morning|this afternoon)\b/gi, ' ')
+    .replace(/\b(at|by|around)\s+\d{1,2}(?::\d{2})?\s*(am|pm)?\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^\s*to\s+/i, '')
+    .trim();
+}
+
+function fallbackReminderNoteText(action, transcript) {
+  return action.text || action.title || reminderNoteTextFromTranscript(transcript) || String(transcript || '').trim() || 'Reminder';
+}
+
+function normalizeActionPlan(actionPlan, transcript = '') {
   const input = actionPlan && typeof actionPlan === 'object' ? actionPlan : {};
-  const actions = Array.isArray(input.actions) ? input.actions.map(normalizeAction) : [];
+  const rawActions = Array.isArray(input.actions) ? input.actions.map(normalizeAction) : [];
+  const actions = [];
+  let createdNoteAvailable = false;
+  for (const action of rawActions) {
+    if (action.type === 'set_reminder' && !action.noteId && !createdNoteAvailable) {
+      const noteText = fallbackReminderNoteText(action, transcript);
+      actions.push({
+        type: 'create_text_note',
+        title: action.title || noteText,
+        text: action.text || noteText
+      });
+      createdNoteAvailable = true;
+    }
+    actions.push(action);
+    if (action.type === 'create_text_note' || action.type === 'create_todo_note') {
+      createdNoteAvailable = true;
+    }
+  }
   const confidence = ['low', 'medium', 'high'].includes(input.confidence) ? input.confidence : 'medium';
   return {
     summary: String(input.summary || '').trim(),
@@ -1221,6 +1612,29 @@ function normalizeActionPlan(actionPlan) {
     actions,
     unresolvedQuestions: asArray(input.unresolvedQuestions).map(String).filter(Boolean)
   };
+}
+
+function actionRequiresCreatedNote(action) {
+  return !action.noteId && (
+    NOTE_TARGET_ACTION_TYPES.has(action.type) ||
+    action.type === 'set_reminder'
+  );
+}
+
+function selectedActionsWithDependencies(actions, selected) {
+  if (!selected) return actions;
+  const expanded = new Set(selected);
+  let latestCreateIndex = null;
+  for (let index = 0; index < actions.length; index += 1) {
+    const action = actions[index];
+    if (expanded.has(index) && actionRequiresCreatedNote(action) && latestCreateIndex !== null) {
+      expanded.add(latestCreateIndex);
+    }
+    if (action.type === 'create_text_note' || action.type === 'create_todo_note') {
+      latestCreateIndex = index;
+    }
+  }
+  return actions.filter((_action, index) => expanded.has(index));
 }
 
 async function findOrCreateLabelForUser(userId, rawName) {
@@ -1236,6 +1650,67 @@ async function findOrCreateLabelForUser(userId, rawName) {
   return { id: result.id, name, created: true };
 }
 
+async function normalizeLabelsForUser(userId, rawLabels) {
+  const normalized = [];
+  const seen = new Set();
+  let changed = false;
+
+  for (const rawLabel of rawLabels || []) {
+    const rawName = String(rawLabel?.name || '').trim();
+    if (!rawName) {
+      changed = true;
+      continue;
+    }
+
+    const key = rawName.toLowerCase();
+    if (seen.has(key)) {
+      changed = true;
+      continue;
+    }
+    seen.add(key);
+
+    const label = await findOrCreateLabelForUser(userId, rawName);
+    const added = rawLabel?.added !== false;
+    const nextLabel = { id: label.id, name: label.name, added };
+    normalized.push(nextLabel);
+
+    if (rawLabel?.id !== nextLabel.id || rawLabel?.name !== nextLabel.name || rawLabel?.added !== nextLabel.added) {
+      changed = true;
+    }
+  }
+
+  return { labels: normalized, changed };
+}
+
+async function backfillImportedNoteLabels() {
+  const rows = await all(
+    `SELECT id, ownerUserId, labels
+     FROM notes
+     WHERE ownerUserId IS NOT NULL
+       AND labels IS NOT NULL
+       AND labels <> ''
+       AND labels <> '[]'`
+  );
+
+  for (const row of rows) {
+    const rawLabels = parseJson(row.labels || '[]', []);
+    if (!Array.isArray(rawLabels) || !rawLabels.length) continue;
+
+    const { labels, changed } = await normalizeLabelsForUser(row.ownerUserId, rawLabels);
+    if (!changed) continue;
+
+    const lww = serverLwwStamp();
+    await run(
+      `UPDATE notes
+       SET labels = ?, lastEditorUserId = COALESCE(lastEditorUserId, ownerUserId),
+           lwwPhysicalMs = ?, lwwLogical = ?, lwwDeviceId = ?, lwwOperationId = ?
+       WHERE id = ?`,
+      [JSON.stringify(labels), lww.physicalMs, lww.logical, lww.deviceId, lww.operationId, row.id]
+    );
+    await recordNoteSyncChange(row.id, 'upsert', [row.ownerUserId]);
+  }
+}
+
 async function findLabelForUser(userId, rawName) {
   const name = String(rawName || '').trim();
   if (!name) return null;
@@ -1243,7 +1718,7 @@ async function findLabelForUser(userId, rawName) {
 }
 
 async function validateKeptActionPlan(userId, transcript, actionPlan) {
-  const normalizedPlan = normalizeActionPlan(actionPlan);
+  const normalizedPlan = normalizeActionPlan(actionPlan, transcript);
   const errors = [];
   const warnings = [];
   const noteCache = new Map();
@@ -1274,7 +1749,7 @@ async function validateKeptActionPlan(userId, transcript, actionPlan) {
     if (action.type === 'create_todo_note' && !action.items?.length) errors.push(`${label}.items are required.`);
     if (action.type === 'add_checklist_items' && !action.items?.length) errors.push(`${label}.items are required.`);
     if (action.type === 'add_labels' && !action.labels?.length) errors.push(`${label}.labels are required.`);
-    if (action.type === 'set_reminder' && !action.dueAtUtc) {
+    if (action.type === 'set_reminder' && !action.dueAtUtc && !isLocationReminderAction(action)) {
       risky = true;
       warnings.push(`${label}.dueAtUtc is missing; ask for a reminder time before executing.`);
       if (!normalizedPlan.unresolvedQuestions.includes('When should Kept remind you?')) {
@@ -1289,7 +1764,12 @@ async function validateKeptActionPlan(userId, transcript, actionPlan) {
     if (action.noteId && !noteCache.has(action.noteId)) {
       noteCache.set(action.noteId, await getAccessibleNote(action.noteId, userId));
     }
-    const note = action.noteId ? noteCache.get(action.noteId) : null;
+    let note = action.noteId ? noteCache.get(action.noteId) : null;
+    if (action.type === 'share_note' && action.noteId && createdNoteAvailable && (!note || note.ownerUserId !== userId)) {
+      warnings.push(`${label}.noteId was ignored because a previous action creates the note to share.`);
+      delete action.noteId;
+      note = null;
+    }
     if (action.noteId && !note) errors.push(`${label}.noteId is not accessible.`);
     if (action.type === 'share_note' && note && note.ownerUserId !== userId) {
       errors.push(`${label}.noteId must be owned by you to share it.`);
@@ -1317,6 +1797,17 @@ async function validateKeptActionPlan(userId, transcript, actionPlan) {
       const due = new Date(action.dueAtUtc);
       if (Number.isNaN(due.getTime())) errors.push(`${label}.dueAtUtc must be a valid date.`);
       else action.dueAtUtc = due.toISOString();
+    }
+    if (action.type === 'set_reminder' && isLocationReminderAction(action)) {
+      if (!Number.isFinite(Number(action.latitude))) errors.push(`${label}.latitude must be a valid number.`);
+      if (!Number.isFinite(Number(action.longitude))) errors.push(`${label}.longitude must be a valid number.`);
+      action.latitude = Number(action.latitude);
+      action.longitude = Number(action.longitude);
+      action.locationTrigger = action.locationTrigger === 'leave' ? 'leave' : 'arrive';
+      if (action.radiusMeters != null) action.radiusMeters = Number(action.radiusMeters);
+      if (action.radiusMeters != null && (!Number.isFinite(action.radiusMeters) || action.radiusMeters <= 0)) {
+        errors.push(`${label}.radiusMeters must be a positive number.`);
+      }
     }
 
     if (action.type === 'create_text_note' || action.type === 'create_todo_note') {
@@ -1364,8 +1855,8 @@ async function smartCreateNote(userId, action, options = {}) {
     : [];
   const result = await run(
     `INSERT INTO notes
-	     (ownerUserId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, lastEditorUserId, isDemo)
-	     VALUES (?, ?, ?, ?, '', ?, '[]', ?, ?, 0, 0, NULL, ?, ?, ?, ?, 0)`,
+	     (ownerUserId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, binder, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, lastEditorUserId, isDemo)
+	     VALUES (?, ?, ?, ?, '', ?, '[]', ?, ?, '', 0, 0, NULL, ?, ?, ?, ?, 0)`,
 	    [
 	      userId,
 	      action.title || '',
@@ -1448,23 +1939,52 @@ async function smartSetReminder(userId, action, fallbackNoteId) {
     if (!note) throw new Error(`Note ${noteId} is not accessible.`);
   }
   const now = new Date().toISOString();
-  const result = await run(
-    `INSERT INTO reminders (noteId, userId, dueAtUtc, timezone, repeatRule, status, title, body, imageUrl, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+  const dueAtUtc = action.dueAtUtc ? new Date(action.dueAtUtc).toISOString() : null;
+  const locationName = action.locationName ? String(action.locationName) : null;
+  const latitude = action.latitude != null ? Number(action.latitude) : null;
+  const longitude = action.longitude != null ? Number(action.longitude) : null;
+  const radiusMeters = action.radiusMeters != null ? Number(action.radiusMeters) : (locationName ? 120 : null);
+  const locationTrigger = action.locationTrigger === 'leave' ? 'leave' : 'arrive';
+  const existing = noteId ? await get('SELECT id FROM reminders WHERE noteId = ?', [noteId]) : null;
+  const reminder = await get(
+    `INSERT INTO reminders
+       (noteId, userId, dueAtUtc, timezone, repeatRule, status, title, body, imageUrl, locationName, latitude, longitude, radiusMeters, locationTrigger, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(noteId) DO UPDATE SET
+       userId = excluded.userId,
+       dueAtUtc = excluded.dueAtUtc,
+       timezone = excluded.timezone,
+       repeatRule = excluded.repeatRule,
+       status = 'pending',
+       title = excluded.title,
+       body = excluded.body,
+       imageUrl = excluded.imageUrl,
+       locationName = excluded.locationName,
+       latitude = excluded.latitude,
+       longitude = excluded.longitude,
+       radiusMeters = excluded.radiusMeters,
+       locationTrigger = excluded.locationTrigger,
+       updatedAt = excluded.updatedAt
+     RETURNING *`,
     [
       noteId || null,
       userId,
-      new Date(action.dueAtUtc).toISOString(),
+      dueAtUtc,
       action.timezone || 'UTC',
       action.repeatRule || null,
       plainText(action.title) || null,
       plainText(action.text) || null,
       String(action.imageUrl || '') || null,
+      locationName,
+      latitude,
+      longitude,
+      radiusMeters,
+      locationTrigger,
       now,
       now
     ]
   );
-  return await get('SELECT * FROM reminders WHERE id = ?', [result.id]);
+  return reminder || await get('SELECT * FROM reminders WHERE id = ?', [existing?.id]);
 }
 
 async function smartShareNote(userId, noteId, userIds) {
@@ -1569,8 +2089,9 @@ async function executeSmartAction(userId, action, state) {
 
 async function syncSmartReminderIntegrations(userId, reminders) {
   if (!reminders.length) return;
+  const enrichedReminders = await enrichReminderResponses(reminders);
   const caldav = await get('SELECT * FROM caldav_settings WHERE userId = ? AND enabled = 1', [userId]);
-  for (const reminder of reminders) {
+  for (const reminder of enrichedReminders) {
     if (caldav) pushReminderToCaldav(caldav, reminder).catch(err => console.error('CalDAV push failed:', err.message));
     gcalPushReminder(userId, reminder).catch(err => console.error('GCal push failed:', err.message));
   }
@@ -1600,7 +2121,8 @@ function decodeNotesCursor(cursor) {
   }
 }
 
-async function cleanupUnusedLabels(userId) {
+async function cleanupUnusedLabels(userId, candidateIds = []) {
+  if (!Array.isArray(candidateIds) || !candidateIds.length) return;
   try {
     const notes = await all('SELECT labels FROM notes WHERE ownerUserId = ?', [userId]);
     const usedLabelNames = new Set();
@@ -1611,7 +2133,11 @@ async function cleanupUnusedLabels(userId) {
       });
     });
 
-    const allLabels = await all('SELECT id, name FROM labels WHERE userId = ?', [userId]);
+    const allLabels = await all(
+      `SELECT id, name FROM labels
+       WHERE userId = ? AND id IN (${candidateIds.map(() => '?').join(',')})`,
+      [userId, ...candidateIds]
+    );
     for (const label of allLabels) {
       if (!usedLabelNames.has(label.name)) {
         await run('DELETE FROM labels WHERE id = ?', [label.id]);
@@ -1620,6 +2146,47 @@ async function cleanupUnusedLabels(userId) {
   } catch (error) {
     console.error('Failed to cleanup labels:', error);
   }
+}
+
+async function updateNoteLabelReferencesForUser(userId, labelId, labelValue, options = {}) {
+  const oldName = String(options.oldName || '').trim().toLowerCase();
+  const rows = await all('SELECT id, labels FROM notes WHERE ownerUserId = ?', [userId]);
+  const recipientIds = new Set([userId]);
+  const changedNoteIds = [];
+  const now = new Date().toISOString();
+
+  for (const row of rows) {
+    let changed = false;
+    let labels = parseJson(row.labels, []);
+    if (!Array.isArray(labels)) labels = [];
+
+    if (labelValue === '') {
+      const nextLabels = labels.filter(label => {
+        const sameId = Number(label?.id) === Number(labelId);
+        const sameOldName = oldName && String(label?.name || '').trim().toLowerCase() === oldName;
+        return !(sameId || sameOldName);
+      });
+      changed = nextLabels.length !== labels.length;
+      labels = nextLabels;
+    } else {
+      labels = labels.map(label => {
+        const sameId = Number(label?.id) === Number(labelId);
+        const sameOldName = oldName && String(label?.name || '').trim().toLowerCase() === oldName;
+        if (!sameId && !sameOldName) return label;
+        changed = true;
+        return { ...label, id: labelId, name: labelValue };
+      });
+    }
+
+    if (!changed) continue;
+    await run('UPDATE notes SET labels = ?, updatedAt = ? WHERE id = ?', [JSON.stringify(labels), now, row.id]);
+    changedNoteIds.push(row.id);
+    const noteRecipients = await getNoteRecipientIds(row.id);
+    noteRecipients.forEach(noteUserId => recipientIds.add(noteUserId));
+    await recordNoteSyncChange(row.id, 'upsert', [...noteRecipients]);
+  }
+
+  return { recipientIds, changedNoteIds };
 }
 
 function noteToParams(note) {
@@ -1648,12 +2215,24 @@ function trashExpirationCutoff() {
 }
 
 async function purgeExpiredTrashedNotes() {
-  const expired = await all('SELECT id FROM notes WHERE trashed = 1 AND trashedAt IS NOT NULL AND trashedAt <= ?', [trashExpirationCutoff()]);
+  const expired = await all('SELECT * FROM notes WHERE trashed = 1 AND trashedAt IS NOT NULL AND trashedAt <= ?', [trashExpirationCutoff()]);
   for (const note of expired) {
+    const recipients = await getNoteRecipientIds(note.id);
+    const stamp = serverLwwStamp();
+    await recordDependentSyncDeletesForNote(note.id, recipients);
     await deleteAttachmentFilesForNote(note.id);
     await deleteImageFilesForNote(note.id);
+    await run('DELETE FROM notes WHERE id = ?', [note.id]);
+    await broadcastNoteChange(note.id, 'deleted', recipients, {
+      deletedSnapshot: {
+        syncId: note.syncId || `note-${crypto.randomUUID()}`,
+        lwwPhysicalMs: stamp.physicalMs,
+        lwwLogical: stamp.logical,
+        lwwDeviceId: stamp.deviceId,
+        lwwOperationId: stamp.operationId
+      }
+    });
   }
-  await run('DELETE FROM notes WHERE trashed = 1 AND trashedAt IS NOT NULL AND trashedAt <= ?', [trashExpirationCutoff()]);
 }
 
 let trashPurgeRunning = false;
@@ -1869,13 +2448,16 @@ function requireAdmin(req, res, next) {
 
 async function getAccessibleNote(noteId, userId) {
   return await get(
-    `SELECT notes.*, CASE WHEN user_pins.noteId IS NOT NULL THEN 1 ELSE 0 END AS userPinned,
+    `SELECT notes.*,
+     COALESCE(pos.sortOrder, notes.sortOrder, notes.id) AS effectiveSortOrder,
+     CASE WHEN user_pins.noteId IS NOT NULL THEN 1 ELSE 0 END AS userPinned,
      lastEditor.displayName AS lastEditorDisplayName FROM notes
      LEFT JOIN note_collaborators ON note_collaborators.noteId = notes.id AND note_collaborators.userId = ?
      LEFT JOIN user_pins ON user_pins.noteId = notes.id AND user_pins.userId = ?
+     LEFT JOIN user_note_positions pos ON pos.noteId = notes.id AND pos.userId = ?
      LEFT JOIN users lastEditor ON lastEditor.id = notes.lastEditorUserId
      WHERE notes.id = ? AND (notes.ownerUserId = ? OR note_collaborators.userId IS NOT NULL)`,
-    [userId, userId, noteId, userId]
+    [userId, userId, userId, noteId, userId]
   );
 }
 
@@ -1896,6 +2478,57 @@ async function getCollaboratorsForNote(noteId) {
     ...publicCollaborator(u),
     online: realtimeClients.has(u.id)
   }));
+}
+
+async function hydrateNoteUserFields(rows, requesterUserId) {
+  const userIds = new Set();
+  for (const row of rows || []) {
+    if (row.ownerUserId) userIds.add(row.ownerUserId);
+    if (row.collaboratorIds) {
+      for (const id of String(row.collaboratorIds).split(',')) {
+        const n = Number(id);
+        if (n) userIds.add(n);
+      }
+    }
+  }
+  if (!userIds.size) return rows || [];
+
+  const ids = Array.from(userIds);
+  const placeholders = ids.map(() => '?').join(',');
+  const userRows = await all(
+    `SELECT id, username, displayName, avatarDataUrl, avatarPreset FROM users WHERE id IN (${placeholders})`,
+    ids
+  );
+  const userMap = new Map(userRows.map(user => [user.id, user]));
+  const me = Number(requesterUserId);
+
+  for (const row of rows || []) {
+    const owner = userMap.get(row.ownerUserId);
+    if (owner) {
+      row.ownerDisplayName = owner.displayName;
+      row.ownerUsername = owner.username;
+      row.ownerAvatarPreset = owner.avatarPreset || 'cat';
+      row.ownerAvatarDataUrl = owner.id === me ? '' : (owner.avatarDataUrl || '');
+    }
+
+    const collabIds = row.collaboratorIds
+      ? String(row.collaboratorIds).split(',').map(Number).filter(Boolean)
+      : [];
+    row.collaborators = JSON.stringify(collabIds.map(id => {
+      const user = userMap.get(id);
+      if (!user) return null;
+      return {
+        id: user.id,
+        username: user.username,
+        displayName: user.displayName,
+        avatarDataUrl: user.id === me ? '' : (user.avatarDataUrl || ''),
+        avatarPreset: user.avatarPreset || 'cat',
+        online: realtimeClients.has(user.id)
+      };
+    }).filter(Boolean));
+  }
+
+  return rows || [];
 }
 
 const realtimeClients = new Map();
@@ -1961,9 +2594,31 @@ async function getNoteRecipientIds(noteId) {
   return rows.map(row => row.userId).filter(Boolean);
 }
 
-async function broadcastNoteChange(noteId, action, userIds) {
+async function broadcastNoteChange(noteId, action, userIds, options = {}) {
   const recipients = userIds || await getNoteRecipientIds(noteId);
-  broadcastRealtime(recipients, { type: 'notes-changed', action, noteId });
+  if (action !== 'deleted' && !options.preserveStamp) {
+    const stamp = serverLwwStamp();
+    await run(
+      `UPDATE notes
+       SET syncId = CASE WHEN syncId IS NULL OR syncId = '' THEN ? ELSE syncId END,
+           lwwPhysicalMs = ?, lwwLogical = ?, lwwDeviceId = ?, lwwOperationId = ?
+       WHERE id = ?`,
+      [`note-${crypto.randomUUID()}`, stamp.physicalMs, stamp.logical, stamp.deviceId, stamp.operationId, noteId]
+    );
+  }
+  await recordNoteSyncChange(
+    noteId,
+    action === 'deleted' ? 'delete' : 'upsert',
+    recipients,
+    options.deletedSnapshot
+  );
+  const payload = { type: 'notes-changed', action, noteId };
+  broadcastRealtime(recipients, payload);
+  if (action === 'created' || action === 'deleted' || action === 'collaborators-updated') {
+    setTimeout(() => {
+      broadcastRealtime(recipients, { ...payload, followup: true });
+    }, 1200);
+  }
 }
 
 async function broadcastProfileUpdate(user) {
@@ -2164,6 +2819,7 @@ function buildReminderPushPayload(reminder) {
     body: plainText(reminder.body),
     imageUrl: reminder.imageUrl || null,
     icon: '/assets/images/keep2x.png',
+    deepLink: reminder.deepLink || (reminder.noteId ? `kept://note/${reminder.noteId}` : null),
     url: '/'
   });
 }
@@ -2417,9 +3073,43 @@ function startReminderScheduler() {
   setInterval(async () => {
     try {
       const now = new Date().toISOString();
-      const due = await all(`SELECT * FROM reminders WHERE status = 'pending' AND dueAtUtc <= ?`, [now]);
-      for (const reminder of due) {
-        await run(`UPDATE reminders SET status = 'fired', updatedAt = ? WHERE id = ?`, [now, reminder.id]);
+      const due = await all(
+        `SELECT reminders.* FROM reminders
+         ${visibleReminderJoin}
+         WHERE reminders.status = 'pending'
+         AND reminders.dueAtUtc <= ?
+         AND ${visibleReminderWhere}`,
+        [now]
+      );
+      const enrichedDue = await enrichReminderResponses(due);
+      for (const reminder of enrichedDue) {
+        const repeat = parseRepeatRule(reminder.repeatRule);
+        const nextDueAtUtc = repeat ? nextRepeatDueAt(reminder.dueAtUtc, repeat) : null;
+        const stamp = serverLwwStamp();
+        let updatedReminder = reminder;
+        if (repeat && nextDueAtUtc) {
+          await run(
+            `UPDATE reminders SET
+               status = 'pending', dueAtUtc = ?, updatedAt = ?,
+               lwwPhysicalMs = ?, lwwLogical = ?, lwwDeviceId = ?, lwwOperationId = ?
+             WHERE id = ?`,
+            [nextDueAtUtc, now, stamp.physicalMs, stamp.logical, stamp.deviceId, stamp.operationId, reminder.id]
+          );
+          if (repeat.moveToTopOnTrigger) await floatReminderNoteToTop(reminder.userId, reminder.noteId);
+          updatedReminder = await get('SELECT * FROM reminders WHERE id = ?', [reminder.id]);
+          await recordReminderSyncChange(updatedReminder, 'upsert');
+        } else {
+          await run(
+            `UPDATE reminders SET
+               status = 'fired', updatedAt = ?,
+               lwwPhysicalMs = ?, lwwLogical = ?, lwwDeviceId = ?, lwwOperationId = ?
+             WHERE id = ?`,
+            [now, stamp.physicalMs, stamp.logical, stamp.deviceId, stamp.operationId, reminder.id]
+          );
+          if (repeat?.moveToTopOnTrigger) await floatReminderNoteToTop(reminder.userId, reminder.noteId);
+          updatedReminder = await get('SELECT * FROM reminders WHERE id = ?', [reminder.id]);
+          await recordReminderSyncChange(updatedReminder, 'upsert');
+        }
         broadcastRealtime([reminder.userId], {
           type: 'reminder-fired',
           reminderId: reminder.id,
@@ -2451,23 +3141,41 @@ function startReminderScheduler() {
 //     docker-compose.yml for the full security tradeoff.
 //
 //   KEPT_CORS_ORIGINS=https://app.example.com,https://kept.example.com
-//     Comma-separated allowlist. Most secure of the three. Required if you
-//     ever switch Kept to cookie-based sessions.
+//     Comma-separated allowlist. Kept also allows exact native-shell origins
+//     so the iOS/Android apps can connect while browser access stays pinned
+//     to your configured domains. Required if you ever switch Kept to
+//     cookie-based sessions.
 //
 // If both are set, the explicit allowlist wins.
 const corsAllowlist = String(process.env.KEPT_CORS_ORIGINS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
+const nativeShellOrigins = new Set([
+  'capacitor://localhost',
+  'ionic://localhost',
+  'http://localhost',
+  'https://localhost'
+]);
 if (corsAllowlist.length) {
+  const allowedOrigins = new Set([...corsAllowlist, ...nativeShellOrigins]);
   app.use(cors({
     origin: (origin, cb) => {
       if (!origin) return cb(null, true); // same-origin / curl
-      cb(null, corsAllowlist.includes(origin));
+      cb(null, allowedOrigins.has(origin));
     },
     credentials: true
   }));
 } else if (process.env.KEPT_CORS_ALLOW_ALL === '1') {
   app.use(cors({ origin: '*' }));
 }
+app.use('/api', (_req, res, next) => {
+  res.set({
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+    Pragma: 'no-cache',
+    Expires: '0',
+    'Surrogate-Control': 'no-store'
+  });
+  next();
+});
 app.use(express.json({ limit: '25mb' }));
 
 app.get('/api/setup/status', asyncRoute(async (_req, res) => {
@@ -3050,17 +3758,26 @@ app.patch('/api/labels/:id', requireAuth, asyncRoute(async (req, res) => {
   const labelId = Number(req.params.id);
   const name = String(req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Label name is required.' });
-  const label = await get('SELECT id FROM labels WHERE id = ? AND userId = ?', [labelId, req.user.id]);
+  const label = await get('SELECT id, name FROM labels WHERE id = ? AND userId = ?', [labelId, req.user.id]);
   if (!label) return res.status(404).json({ error: 'Label not found.' });
+  const duplicate = await get(
+    'SELECT id FROM labels WHERE userId = ? AND lower(name) = lower(?) AND id <> ?',
+    [req.user.id, name, labelId]
+  );
+  if (duplicate) return res.status(409).json({ error: 'Label already exists.' });
   await run('UPDATE labels SET name = ? WHERE id = ? AND userId = ?', [name, labelId, req.user.id]);
+  const { recipientIds } = await updateNoteLabelReferencesForUser(req.user.id, labelId, name, { oldName: label.name });
+  broadcastRealtime([...recipientIds], { type: 'notes-changed', action: 'labels-updated' });
   res.json({ id: labelId, name });
 }));
 
 app.delete('/api/labels/:id', requireAuth, asyncRoute(async (req, res) => {
   const labelId = Number(req.params.id);
-  const label = await get('SELECT id FROM labels WHERE id = ? AND userId = ?', [labelId, req.user.id]);
+  const label = await get('SELECT id, name FROM labels WHERE id = ? AND userId = ?', [labelId, req.user.id]);
   if (!label) return res.status(404).json({ error: 'Label not found.' });
   await run('DELETE FROM labels WHERE id = ? AND userId = ?', [labelId, req.user.id]);
+  const { recipientIds } = await updateNoteLabelReferencesForUser(req.user.id, labelId, '', { oldName: label.name });
+  broadcastRealtime([...recipientIds], { type: 'notes-changed', action: 'labels-updated' });
   res.status(204).end();
 }));
 
@@ -3128,26 +3845,29 @@ app.post('/api/notes/:noteId/attachments', requireAuth, uploadAttachment.single(
   }
 
   const now = new Date().toISOString();
+  const stamp = serverLwwStamp();
+  const syncId = String(req.body?.syncId || req.query?.syncId || `attachment-${crypto.randomUUID()}`);
   const result = await run(
-    `INSERT INTO note_attachments (noteId, originalName, storedFilename, fileSize, mimeType, uploadedAt)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO note_attachments
+       (noteId, syncId, originalName, storedFilename, fileSize, mimeType, uploadedAt, lwwPhysicalMs, lwwLogical, lwwDeviceId, lwwOperationId)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       noteId,
+      syncId,
       safeDownloadName(req.file.originalname || req.file.filename),
       req.file.filename,
       req.file.size,
       req.file.mimetype,
-      now
+      now,
+      stamp.physicalMs,
+      stamp.logical,
+      stamp.deviceId,
+      stamp.operationId
     ]
   );
-
-  res.status(201).json({
-    id: result.id,
-    originalName: safeDownloadName(req.file.originalname || req.file.filename),
-    fileSize: req.file.size,
-    mimeType: req.file.mimetype,
-    uploadedAt: now
-  });
+  const attachment = await get('SELECT * FROM note_attachments WHERE id = ?', [result.id]);
+  await recordAttachmentSyncChange(attachment, 'upsert');
+  res.status(201).json(attachmentResponse(attachment));
   await broadcastNoteChange(noteId, 'updated');
 }));
 
@@ -3200,10 +3920,477 @@ app.delete('/api/notes/:noteId/attachments/:attachmentId', requireAuth, asyncRou
   }
 
   // Delete from database
+  const recipients = await getNoteRecipientIds(noteId);
+  const stamp = serverLwwStamp();
+  attachment.syncId = attachment.syncId || `attachment-${crypto.randomUUID()}`;
+  attachment.lwwPhysicalMs = stamp.physicalMs;
+  attachment.lwwLogical = stamp.logical;
+  attachment.lwwDeviceId = stamp.deviceId;
+  attachment.lwwOperationId = stamp.operationId;
   await run('DELETE FROM note_attachments WHERE id = ?', [attachmentId]);
+  await recordAttachmentSyncChange(attachment, 'delete', recipients);
   await broadcastNoteChange(noteId, 'updated');
 
   res.status(204).end();
+}));
+
+
+async function syncSnapshotForUser(userId) {
+  const notes = await all(
+    `SELECT notes.*,
+            COALESCE(pos.sortOrder, notes.sortOrder) AS effectiveSortOrder,
+            CASE WHEN user_pins.noteId IS NOT NULL THEN 1 ELSE 0 END AS userPinned,
+            lastEditor.displayName AS lastEditorDisplayName,
+            (SELECT GROUP_CONCAT(nc.userId) FROM note_collaborators nc WHERE nc.noteId = notes.id) AS collaboratorIds
+     FROM notes
+     LEFT JOIN users lastEditor ON lastEditor.id = notes.lastEditorUserId
+     LEFT JOIN user_pins ON user_pins.noteId = notes.id AND user_pins.userId = ?
+     LEFT JOIN user_note_positions pos ON pos.noteId = notes.id AND pos.userId = ?
+     LEFT JOIN note_collaborators access ON access.noteId = notes.id AND access.userId = ?
+     WHERE notes.ownerUserId = ? OR access.userId IS NOT NULL
+     ORDER BY userPinned DESC, effectiveSortOrder DESC, notes.id DESC`,
+    [userId, userId, userId, userId]
+  );
+  await hydrateNoteUserFields(notes, userId);
+  const noteIds = notes.map(note => note.id);
+  const attachmentsByNoteId = new Map();
+  if (noteIds.length) {
+    const placeholders = noteIds.map(() => '?').join(',');
+    const attachments = await all(
+      `SELECT id, syncId, noteId, originalName, fileSize, mimeType, uploadedAt,
+              lwwPhysicalMs, lwwLogical, lwwDeviceId, lwwOperationId
+       FROM note_attachments
+       WHERE noteId IN (${placeholders})
+       ORDER BY uploadedAt DESC`,
+      noteIds
+    );
+    for (const attachment of attachments) {
+      if (!attachmentsByNoteId.has(attachment.noteId)) attachmentsByNoteId.set(attachment.noteId, []);
+      attachmentsByNoteId.get(attachment.noteId).push(attachmentResponse(attachment));
+    }
+  }
+  const reminders = await all(`SELECT * FROM reminders WHERE userId = ?`, [userId]);
+  const cursorRow = await get('SELECT COALESCE(MAX(sequence), 0) AS cursor FROM sync_changes WHERE userId = ?', [userId]);
+  return {
+    notes: notes.map(row => {
+      const note = dbNoteToApi(row);
+      note.attachments = attachmentsByNoteId.get(row.id) || [];
+      return note;
+    }),
+    reminders: await enrichReminderResponses(reminders),
+    attachments: Array.from(attachmentsByNoteId.values()).flat(),
+    cursor: Number(cursorRow?.cursor || 0),
+    serverTime: Date.now()
+  };
+}
+
+app.get('/api/sync/bootstrap', requireAuth, asyncRoute(async (req, res) => {
+  res.json(await syncSnapshotForUser(req.user.id));
+}));
+
+app.get('/api/sync/changes', requireAuth, asyncRoute(async (req, res) => {
+  const since = Math.max(0, Number(req.query.cursor || req.query.since || 0) || 0);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 500, 1), 2000);
+  const rows = await all(
+    `SELECT * FROM sync_changes
+     WHERE userId = ? AND sequence > ?
+     ORDER BY sequence ASC
+     LIMIT ?`,
+    [req.user.id, since, limit]
+  );
+  const cursorRow = await get('SELECT COALESCE(MAX(sequence), 0) AS cursor FROM sync_changes WHERE userId = ?', [req.user.id]);
+  res.json({
+    changes: rows.map(row => ({
+      sequence: row.sequence,
+      resourceType: row.resourceType,
+      resourceSyncId: row.resourceSyncId,
+      operation: row.operation,
+      payload: parseJson(row.payload || 'null', null),
+      lww: {
+        physicalMs: Number(row.lwwPhysicalMs || 0),
+        logical: Number(row.lwwLogical || 0),
+        deviceId: row.lwwDeviceId || '',
+        operationId: row.lwwOperationId || ''
+      },
+      changedAt: row.changedAt
+    })),
+    cursor: rows.length ? Number(rows[rows.length - 1].sequence) : since,
+    hasMore: rows.length === limit && Number(rows[rows.length - 1].sequence) < Number(cursorRow?.cursor || 0),
+    serverCursor: Number(cursorRow?.cursor || 0),
+    serverTime: Date.now()
+  });
+}));
+
+async function applySyncNoteMutation(userId, mutation) {
+  const type = String(mutation.type || '');
+  const payload = mutation.payload || {};
+  if (type === 'note.reorder') {
+    const syncIds = Array.isArray(payload.syncIds) ? payload.syncIds.map(String).filter(Boolean) : [];
+    if (!syncIds.length) return { ok: true, skipped: true, resourceType: 'note-order' };
+    const placeholders = syncIds.map(() => '?').join(',');
+    const rows = await all(
+      `SELECT notes.id, notes.syncId
+       FROM notes
+       LEFT JOIN note_collaborators access ON access.noteId = notes.id AND access.userId = ?
+       WHERE notes.syncId IN (${placeholders})
+         AND (notes.ownerUserId = ? OR access.userId IS NOT NULL)`,
+      [userId, ...syncIds, userId]
+    );
+    const bySyncId = new Map(rows.map(row => [row.syncId, row.id]));
+    const base = Date.now();
+    for (let index = 0; index < syncIds.length; index += 1) {
+      const noteId = bySyncId.get(syncIds[index]);
+      if (!noteId) continue;
+      await run(
+        `INSERT OR REPLACE INTO user_note_positions (userId, noteId, sortOrder) VALUES (?, ?, ?)`,
+        [userId, noteId, base + syncIds.length - index]
+      );
+      await recordNoteSyncChange(noteId, 'upsert', [userId]);
+    }
+    broadcastRealtime([userId], { type: 'notes-changed', action: 'reordered' });
+    return { ok: true, resourceType: 'note-order' };
+  }
+  const syncId = String(mutation.syncId || payload.syncId || payload.clientId || `note-${crypto.randomUUID()}`);
+  const incomingStamp = normalizeLwwStamp(mutation.lww || payload);
+  const existing = await get('SELECT * FROM notes WHERE syncId = ? OR id = ?', [syncId, Number(payload.id || mutation.id || 0)]);
+  if (existing && compareLwwStamp(incomingStamp, rowLwwStamp(existing)) < 0) {
+    return { ok: true, skipped: true, resourceType: 'note', syncId, id: existing.id };
+  }
+  if (type === 'note.delete') {
+    const note = existing ? await getAccessibleNote(existing.id, userId) : null;
+    if (!note) return { ok: true, skipped: true, resourceType: 'note', syncId };
+    const recipients = await getNoteRecipientIds(note.id);
+    await recordDependentSyncDeletesForNote(note.id, recipients);
+    await deleteAttachmentFilesForNote(note.id);
+    await deleteImageFilesForNote(note.id);
+    await run('DELETE FROM notes WHERE id = ?', [note.id]);
+    await recordNoteSyncChange(note.id, 'delete', recipients, {
+      syncId,
+      lwwPhysicalMs: incomingStamp.physicalMs,
+      lwwLogical: incomingStamp.logical,
+      lwwDeviceId: incomingStamp.deviceId,
+      lwwOperationId: incomingStamp.operationId
+    });
+    broadcastRealtime(recipients, { type: 'notes-changed', action: 'deleted', noteId: note.id });
+    return { ok: true, resourceType: 'note', syncId, id: note.id, deleted: true };
+  }
+
+  const noteData = canonicalizeNotePayload(payload);
+  const now = new Date().toISOString();
+  if (!existing) {
+    const result = await run(
+      `INSERT INTO notes
+       (ownerUserId, syncId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, binder, locked, lockSalt, lockHash, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, lastEditorUserId, isDemo,
+        lwwPhysicalMs, lwwLogical, lwwDeviceId, lwwOperationId)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        userId,
+        syncId,
+        String(noteData.noteTitle || ''),
+        noteData.noteBody || '',
+        noteData.bgColor || '',
+        noteData.bgImage || '',
+        JSON.stringify(noteData.checkBoxes || []),
+        JSON.stringify(noteData.images || []),
+        noteData.isCbox ? 1 : 0,
+        JSON.stringify(noteData.labels || []),
+        noteData.binder || '',
+        noteData.locked ? 1 : 0,
+        noteData.lockSalt || '',
+        noteData.lockHash || '',
+        noteData.archived ? 1 : 0,
+        noteData.trashed ? 1 : 0,
+        noteData.trashed ? now : null,
+        Number(payload.sortOrder || Date.now()),
+        payload.createdAt || now,
+        now,
+        userId,
+        noteData.isDemo ? 1 : 0,
+        incomingStamp.physicalMs,
+        incomingStamp.logical,
+        incomingStamp.deviceId,
+        incomingStamp.operationId
+      ]
+    );
+    if (noteData.pinned) await run('INSERT OR IGNORE INTO user_pins (userId, noteId) VALUES (?, ?)', [userId, result.id]);
+    await syncNoteImagesForNote(result.id, userId, noteData);
+    await recordNoteSyncChange(result.id, 'upsert', [userId]);
+    broadcastRealtime([userId], { type: 'notes-changed', action: 'created', noteId: result.id });
+    return { ok: true, resourceType: 'note', syncId, id: result.id };
+  }
+
+  const note = await getAccessibleNote(existing.id, userId);
+  if (!note) return { ok: false, status: 403, error: 'Note not accessible.', syncId };
+  const isOwner = note.ownerUserId === userId;
+  if (!Object.prototype.hasOwnProperty.call(payload, 'binder')) {
+    noteData.binder = note.binder || '';
+  }
+  if (!Object.prototype.hasOwnProperty.call(payload, 'locked')) {
+    noteData.locked = Boolean(note.locked);
+  }
+  if (!Object.prototype.hasOwnProperty.call(payload, 'lockSalt')) {
+    noteData.lockSalt = note.lockSalt || '';
+  }
+  if (!Object.prototype.hasOwnProperty.call(payload, 'lockHash')) {
+    noteData.lockHash = note.lockHash || '';
+  }
+  if (!isOwner) {
+    noteData.bgColor = note.bgColor || '';
+    noteData.bgImage = note.bgImage || '';
+    noteData.labels = parseJson(note.labels, []);
+    noteData.binder = note.binder || '';
+    noteData.archived = Boolean(note.archived);
+    noteData.trashed = Boolean(note.trashed);
+    noteData.pinned = Boolean(note.pinned);
+    noteData.isCbox = Boolean(note.isCbox);
+    noteData.locked = Boolean(note.locked);
+    noteData.lockSalt = note.lockSalt || '';
+    noteData.lockHash = note.lockHash || '';
+  }
+  const trashedAt = nextTrashedAt(note, noteData);
+  await run(
+    `UPDATE notes SET
+      noteTitle = ?, noteBody = ?, bgColor = ?, bgImage = ?,
+      checkBoxes = ?, images = ?, isCbox = ?, labels = ?, binder = ?, locked = ?, lockSalt = ?, lockHash = ?, archived = ?, trashed = ?, trashedAt = ?, updatedAt = ?, lastEditorUserId = ?, isDemo = ?,
+      lwwPhysicalMs = ?, lwwLogical = ?, lwwDeviceId = ?, lwwOperationId = ?
+     WHERE id = ?`,
+    [
+      String(noteData.noteTitle || ''),
+      noteData.noteBody || '',
+      noteData.bgColor || '',
+      noteData.bgImage || '',
+      JSON.stringify(noteData.checkBoxes || []),
+      JSON.stringify(noteData.images || []),
+      noteData.isCbox ? 1 : 0,
+      JSON.stringify(noteData.labels || []),
+      noteData.binder || '',
+      noteData.locked ? 1 : 0,
+      noteData.lockSalt || '',
+      noteData.lockHash || '',
+      noteData.archived ? 1 : 0,
+      noteData.trashed ? 1 : 0,
+      trashedAt,
+      now,
+      userId,
+      noteData.isDemo ? 1 : 0,
+      incomingStamp.physicalMs,
+      incomingStamp.logical,
+      incomingStamp.deviceId,
+      incomingStamp.operationId,
+      note.id
+    ]
+  );
+  if (isOwner) {
+    if (noteData.pinned) await run('INSERT OR IGNORE INTO user_pins (userId, noteId) VALUES (?, ?)', [userId, note.id]);
+    else await run('DELETE FROM user_pins WHERE userId = ? AND noteId = ?', [userId, note.id]);
+  }
+  await syncNoteImagesForNote(note.id, note.ownerUserId, noteData);
+  await cleanupUnusedLabels(userId);
+  await broadcastNoteChange(note.id, 'updated', undefined, { preserveStamp: true });
+  return { ok: true, resourceType: 'note', syncId, id: note.id };
+}
+
+async function applySyncReminderMutation(userId, mutation) {
+  const type = String(mutation.type || '');
+  const payload = mutation.payload || {};
+  const syncId = String(mutation.syncId || payload.syncId || `reminder-${crypto.randomUUID()}`);
+  const incomingStamp = normalizeLwwStamp(mutation.lww || payload);
+  const existing = await get('SELECT * FROM reminders WHERE syncId = ? OR id = ?', [syncId, Number(payload.id || mutation.id || 0)]);
+  if (existing && compareLwwStamp(incomingStamp, rowLwwStamp(existing)) < 0) {
+    return { ok: true, skipped: true, resourceType: 'reminder', syncId, id: existing.id };
+  }
+  if (type === 'reminder.delete') {
+    if (!existing || existing.userId !== userId) return { ok: true, skipped: true, resourceType: 'reminder', syncId };
+    await run('DELETE FROM reminders WHERE id = ?', [existing.id]);
+    await recordReminderSyncChange({
+      ...existing,
+      syncId,
+      lwwPhysicalMs: incomingStamp.physicalMs,
+      lwwLogical: incomingStamp.logical,
+      lwwDeviceId: incomingStamp.deviceId,
+      lwwOperationId: incomingStamp.operationId
+    }, 'delete');
+    return { ok: true, resourceType: 'reminder', syncId, id: existing.id, deleted: true };
+  }
+  const normalized = normalizeReminderPayload(payload, existing || {});
+  if ((!normalized.noteId || normalized.noteId < 0) && payload.noteSyncId) {
+    const noteBySyncId = await get(
+      `SELECT notes.id FROM notes
+       LEFT JOIN note_collaborators nc ON nc.noteId = notes.id AND nc.userId = ?
+       WHERE notes.syncId = ? AND (notes.ownerUserId = ? OR nc.userId IS NOT NULL)`,
+      [userId, String(payload.noteSyncId), userId]
+    );
+    normalized.noteId = noteBySyncId?.id || null;
+    if (!normalized.noteId) {
+      return {
+        ok: false,
+        status: 409,
+        retryable: true,
+        error: 'The reminder is waiting for its note to synchronize.',
+        syncId
+      };
+    }
+  }
+  if (!normalized.dueAtUtc && !normalized.locationName) return { ok: false, status: 400, error: 'Either dueAtUtc or locationName is required.', syncId };
+  if (normalized.locationName && (normalized.latitude == null || normalized.longitude == null)) return { ok: false, status: 400, error: 'Location reminders require latitude and longitude.', syncId };
+  if (normalized.noteId) {
+    const note = await getAccessibleNote(normalized.noteId, userId);
+    if (!note) return { ok: false, status: 404, error: 'Note not found.', syncId };
+  }
+  const now = new Date().toISOString();
+  let reminder;
+  if (existing) {
+    reminder = await get(
+      `UPDATE reminders SET
+         noteId = ?, userId = ?, dueAtUtc = ?, timezone = ?, repeatRule = ?, status = ?,
+         title = ?, body = ?, imageUrl = ?, locationName = ?, latitude = ?, longitude = ?,
+         radiusMeters = ?, locationTrigger = ?, updatedAt = ?,
+         lwwPhysicalMs = ?, lwwLogical = ?, lwwDeviceId = ?, lwwOperationId = ?
+       WHERE id = ?
+       RETURNING *`,
+      [
+        normalized.noteId,
+        userId,
+        normalized.dueAtUtc,
+        normalized.timezone,
+        normalized.repeatRule,
+        normalized.status || 'pending',
+        normalized.title,
+        normalized.body,
+        normalized.imageUrl,
+        normalized.locationName,
+        normalized.latitude,
+        normalized.longitude,
+        normalized.radiusMeters,
+        normalized.locationTrigger,
+        now,
+        incomingStamp.physicalMs,
+        incomingStamp.logical,
+        incomingStamp.deviceId,
+        incomingStamp.operationId,
+        existing.id
+      ]
+    );
+  } else {
+    reminder = await get(
+    `INSERT INTO reminders (noteId, userId, dueAtUtc, timezone, repeatRule, status, title, body, imageUrl, locationName, latitude, longitude, radiusMeters, locationTrigger, createdAt, updatedAt, syncId, lwwPhysicalMs, lwwLogical, lwwDeviceId, lwwOperationId)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(noteId) DO UPDATE SET
+       userId = excluded.userId,
+       dueAtUtc = excluded.dueAtUtc,
+       timezone = excluded.timezone,
+       repeatRule = excluded.repeatRule,
+       status = excluded.status,
+       title = excluded.title,
+       body = excluded.body,
+       imageUrl = excluded.imageUrl,
+       locationName = excluded.locationName,
+       latitude = excluded.latitude,
+       longitude = excluded.longitude,
+       radiusMeters = excluded.radiusMeters,
+       locationTrigger = excluded.locationTrigger,
+       updatedAt = excluded.updatedAt,
+       syncId = COALESCE(reminders.syncId, excluded.syncId),
+       lwwPhysicalMs = excluded.lwwPhysicalMs,
+       lwwLogical = excluded.lwwLogical,
+       lwwDeviceId = excluded.lwwDeviceId,
+       lwwOperationId = excluded.lwwOperationId
+     RETURNING *`,
+    [
+      normalized.noteId,
+      userId,
+      normalized.dueAtUtc,
+      normalized.timezone,
+      normalized.repeatRule,
+      normalized.status || 'pending',
+      normalized.title,
+      normalized.body,
+      normalized.imageUrl,
+      normalized.locationName,
+      normalized.latitude,
+      normalized.longitude,
+      normalized.radiusMeters,
+      normalized.locationTrigger,
+      payload.createdAt || now,
+      now,
+      syncId,
+      incomingStamp.physicalMs,
+      incomingStamp.logical,
+      incomingStamp.deviceId,
+      incomingStamp.operationId
+    ]
+  );
+  }
+  await recordReminderSyncChange(reminder, 'upsert');
+  return { ok: true, resourceType: 'reminder', syncId: reminder.syncId, id: reminder.id, payload: await enrichReminderResponse(reminder) };
+}
+
+async function applySyncAttachmentMutation(userId, mutation) {
+  const type = String(mutation.type || '');
+  const payload = mutation.payload || {};
+  const syncId = String(mutation.syncId || payload.syncId || '');
+  if (type !== 'attachment.delete' || !syncId) return { ok: false, status: 400, error: 'Unsupported attachment mutation.', syncId };
+  const attachment = await get(
+    `SELECT na.* FROM note_attachments na
+     JOIN notes n ON n.id = na.noteId
+     WHERE na.syncId = ? AND n.ownerUserId = ?`,
+    [syncId, userId]
+  );
+  if (!attachment) return { ok: true, skipped: true, resourceType: 'attachment', syncId };
+  const incomingStamp = normalizeLwwStamp(mutation.lww || payload);
+  if (compareLwwStamp(incomingStamp, rowLwwStamp(attachment)) < 0) {
+    return { ok: true, skipped: true, resourceType: 'attachment', syncId, id: attachment.id };
+  }
+  const recipients = await getNoteRecipientIds(attachment.noteId);
+  const filePath = attachmentPath(attachment.storedFilename);
+  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  await run('DELETE FROM note_attachments WHERE id = ?', [attachment.id]);
+  await recordAttachmentSyncChange({
+    ...attachment,
+    lwwPhysicalMs: incomingStamp.physicalMs,
+    lwwLogical: incomingStamp.logical,
+    lwwDeviceId: incomingStamp.deviceId,
+    lwwOperationId: incomingStamp.operationId
+  }, 'delete', recipients);
+  await broadcastNoteChange(attachment.noteId, 'updated');
+  return { ok: true, resourceType: 'attachment', syncId, id: attachment.id, deleted: true };
+}
+
+app.post('/api/sync/mutations', requireAuth, asyncRoute(async (req, res) => {
+  const mutations = Array.isArray(req.body?.mutations) ? req.body.mutations : [];
+  if (!mutations.length) return res.json({ results: [], serverTime: Date.now() });
+  const priority = {
+    'note.upsert': 0,
+    'note.delete': 1,
+    'note.reorder': 2,
+    'reminder.upsert': 3,
+    'reminder.delete': 4,
+    'attachment.delete': 5
+  };
+  const ordered = mutations
+    .map((mutation, index) => ({ mutation, index }))
+    .sort((left, right) =>
+      (priority[left.mutation.type] ?? 99) - (priority[right.mutation.type] ?? 99) ||
+      left.index - right.index
+    );
+  const results = new Array(mutations.length);
+  for (const { mutation, index } of ordered) {
+    try {
+      if (String(mutation.type || '').startsWith('note.')) {
+        results[index] = await applySyncNoteMutation(req.user.id, mutation);
+      } else if (String(mutation.type || '').startsWith('reminder.')) {
+        results[index] = await applySyncReminderMutation(req.user.id, mutation);
+      } else if (String(mutation.type || '').startsWith('attachment.')) {
+        results[index] = await applySyncAttachmentMutation(req.user.id, mutation);
+      } else {
+        results[index] = { ok: false, status: 400, error: 'Unsupported mutation type.', type: mutation.type };
+      }
+    } catch (error) {
+      console.error('Sync mutation failed:', error);
+      results[index] = { ok: false, status: 500, error: error.message || 'Sync mutation failed.', type: mutation.type };
+    }
+  }
+  res.json({ results, serverTime: Date.now(), snapshot: await syncSnapshotForUser(req.user.id) });
 }));
 
 
@@ -3222,6 +4409,8 @@ app.get('/api/notes', requireAuth, asyncRoute(async (req, res) => {
     const cursor = decodeNotesCursor(req.query.cursor);
     const searchTokens = searchTokensFromQuery(req.query.q);
     const searchWhere = noteSearchWhere(searchTokens);
+    const searchOperators = searchOperatorsFromQuery(req.query.q);
+    const operatorWhere = noteOperatorWhere(searchOperators);
     const whereClauses = [];
     const queryParams = [req.user.id, req.user.id, req.user.id, req.user.id];
     if (cursor) {
@@ -3236,10 +4425,14 @@ app.get('/api/notes', requireAuth, asyncRoute(async (req, res) => {
       whereClauses.push(searchWhere.clause);
       queryParams.push(...searchWhere.params);
     }
+    if (operatorWhere.clauses.length) {
+      whereClauses.push(...operatorWhere.clauses);
+      queryParams.push(...operatorWhere.params);
+    }
     const pageWhere = whereClauses.length ? `WHERE ${whereClauses.join(' AND ')}` : '';
     let page;
     let hasMore;
-    if (!searchTokens.length) {
+    if (!searchTokens.length && !operatorWhere.clauses.length) {
       const keyRows = await all(
         `WITH accessible_notes AS (
           SELECT notes.id,
@@ -3390,7 +4583,8 @@ app.get('/api/notes', requireAuth, asyncRoute(async (req, res) => {
     if (attachmentNoteIds.length) {
       const placeholders = attachmentNoteIds.map(() => '?').join(',');
       const attachmentRows = await all(
-        `SELECT id, noteId, originalName, fileSize, mimeType, uploadedAt
+        `SELECT id, syncId, noteId, originalName, fileSize, mimeType, uploadedAt,
+                lwwPhysicalMs, lwwLogical, lwwDeviceId, lwwOperationId
          FROM note_attachments
          WHERE noteId IN (${placeholders})
          ORDER BY uploadedAt DESC`,
@@ -3403,11 +4597,7 @@ app.get('/api/notes', requireAuth, asyncRoute(async (req, res) => {
           attachmentsByNoteId.set(attachment.noteId, []);
         }
         attachmentsByNoteId.get(attachment.noteId).push({
-          id: attachment.id,
-          originalName: attachment.originalName,
-          fileSize: attachment.fileSize,
-          mimeType: attachment.mimeType,
-          uploadedAt: attachment.uploadedAt
+          ...attachmentResponse(attachment)
         });
       }
       for (const note of notes) {
@@ -3485,20 +4675,16 @@ app.get('/api/notes', requireAuth, asyncRoute(async (req, res) => {
   if (noteIds.length) {
     const placeholders = noteIds.map(() => '?').join(',');
     const attachments = await all(
-      `SELECT id, noteId, originalName, fileSize, mimeType, uploadedAt FROM note_attachments WHERE noteId IN (${placeholders}) ORDER BY uploadedAt DESC`,
+      `SELECT id, syncId, noteId, originalName, fileSize, mimeType, uploadedAt,
+              lwwPhysicalMs, lwwLogical, lwwDeviceId, lwwOperationId
+       FROM note_attachments WHERE noteId IN (${placeholders}) ORDER BY uploadedAt DESC`,
       noteIds
     );
     for (const att of attachments) {
       if (!attachmentsByNoteId.has(att.noteId)) {
         attachmentsByNoteId.set(att.noteId, []);
       }
-      attachmentsByNoteId.get(att.noteId).push({
-        id: att.id,
-        originalName: att.originalName,
-        fileSize: att.fileSize,
-        mimeType: att.mimeType,
-        uploadedAt: att.uploadedAt
-      });
+      attachmentsByNoteId.get(att.noteId).push(attachmentResponse(att));
     }
   }
 
@@ -3615,9 +4801,7 @@ app.post('/api/ai/action-plan/execute', requireAuth, asyncRoute(async (req, res)
   const selected = Array.isArray(executeOptions.selectedActionIndexes)
     ? new Set(executeOptions.selectedActionIndexes.map(Number).filter(Number.isInteger))
     : null;
-  const actions = selected
-    ? validation.normalizedPlan.actions.filter((_action, index) => selected.has(index))
-    : validation.normalizedPlan.actions;
+  const actions = selectedActionsWithDependencies(validation.normalizedPlan.actions, selected);
   const state = {
     createdNoteIds: [],
     updatedNoteIds: new Set(),
@@ -3672,7 +4856,7 @@ app.post('/api/ai/action-plan/execute', requireAuth, asyncRoute(async (req, res)
   for (const noteId of state.createdNoteIds) await broadcastNoteChange(noteId, 'created', [req.user.id]);
   for (const noteId of state.updatedNoteIds) await broadcastNoteChange(noteId, 'updated');
   for (const share of state.shareBroadcasts) await broadcastNoteChange(share.noteId, 'collaborators-updated', share.previousRecipients);
-  if (state.createdLabelIds.size) await cleanupUnusedLabels(req.user.id);
+  if (state.createdLabelIds.size) await cleanupUnusedLabels(req.user.id, Array.from(state.createdLabelIds));
   await syncSmartReminderIntegrations(req.user.id, state.remindersToSync);
 
   res.status(failed.length ? 207 : 200).json(response);
@@ -3832,12 +5016,14 @@ app.post('/api/notes', requireAuth, asyncRoute(async (req, res) => {
   const noteData = canonicalizeNotePayload(req.body);
   const now = new Date().toISOString();
   const trashedAt = noteData.trashed ? now : null;
+  const syncId = String(noteData.syncId || noteData.clientId || `note-${crypto.randomUUID()}`);
   const result = await run(
     `INSERT INTO notes
-     (ownerUserId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, lastEditorUserId, isDemo)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (ownerUserId, syncId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, binder, locked, lockSalt, lockHash, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, lastEditorUserId, isDemo)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       req.user.id,
+      syncId,
       String(noteData.noteTitle || ''),
       noteData.noteBody || '',
       noteData.bgColor || '',
@@ -3846,6 +5032,10 @@ app.post('/api/notes', requireAuth, asyncRoute(async (req, res) => {
       JSON.stringify(noteData.images || []),
       noteData.isCbox ? 1 : 0,
       JSON.stringify(noteData.labels || []),
+      noteData.binder || '',
+      noteData.locked ? 1 : 0,
+      noteData.lockSalt || '',
+      noteData.lockHash || '',
       noteData.archived ? 1 : 0,
       noteData.trashed ? 1 : 0,
       trashedAt,
@@ -3861,7 +5051,8 @@ app.post('/api/notes', requireAuth, asyncRoute(async (req, res) => {
     await run('INSERT OR IGNORE INTO user_pins (userId, noteId) VALUES (?, ?)', [req.user.id, result.id]);
   }
   await broadcastNoteChange(result.id, 'created', [req.user.id]);
-  res.status(201).json({ id: result.id });
+  const created = await getAccessibleNote(result.id, req.user.id);
+  res.status(201).json(dbNoteToApi(created));
 }));
 
 app.put('/api/notes/:id', requireAuth, asyncRoute(async (req, res) => {
@@ -3873,16 +5064,20 @@ app.put('/api/notes/:id', requireAuth, asyncRoute(async (req, res) => {
     next.bgColor = note.bgColor || '';
     next.bgImage = note.bgImage || '';
     next.labels = parseJson(note.labels, []);
+    next.binder = note.binder || '';
     next.archived = Boolean(note.archived);
     next.trashed = Boolean(note.trashed);
     next.pinned = Boolean(note.pinned);
     next.isCbox = Boolean(note.isCbox);
+    next.locked = Boolean(note.locked);
+    next.lockSalt = note.lockSalt || '';
+    next.lockHash = note.lockHash || '';
   }
   const trashedAt = nextTrashedAt(note, next);
   await run(
     `UPDATE notes SET
       noteTitle = ?, noteBody = ?, bgColor = ?, bgImage = ?,
-      checkBoxes = ?, images = ?, isCbox = ?, labels = ?, archived = ?, trashed = ?, trashedAt = ?, updatedAt = ?, lastEditorUserId = ?, isDemo = ?
+      checkBoxes = ?, images = ?, isCbox = ?, labels = ?, binder = ?, locked = ?, lockSalt = ?, lockHash = ?, archived = ?, trashed = ?, trashedAt = ?, updatedAt = ?, lastEditorUserId = ?, isDemo = ?
      WHERE id = ?`,
     [
       String(next.noteTitle || ''),
@@ -3893,6 +5088,10 @@ app.put('/api/notes/:id', requireAuth, asyncRoute(async (req, res) => {
       JSON.stringify(next.images || []),
       next.isCbox ? 1 : 0,
       JSON.stringify(next.labels || []),
+      next.binder || '',
+      next.locked ? 1 : 0,
+      next.lockSalt || '',
+      next.lockHash || '',
       next.archived ? 1 : 0,
       next.trashed ? 1 : 0,
       trashedAt,
@@ -3924,16 +5123,20 @@ app.patch('/api/notes/:id', requireAuth, asyncRoute(async (req, res) => {
     next.bgColor = existing.bgColor || '';
     next.bgImage = existing.bgImage || '';
     next.labels = parseJson(existing.labels, []);
+    next.binder = existing.binder || '';
     next.archived = Boolean(existing.archived);
     next.trashed = Boolean(existing.trashed);
     next.pinned = Boolean(existing.pinned);
     next.isCbox = Boolean(existing.isCbox);
+    next.locked = Boolean(existing.locked);
+    next.lockSalt = existing.lockSalt || '';
+    next.lockHash = existing.lockHash || '';
   }
   const trashedAt = nextTrashedAt(existing, next);
   await run(
     `UPDATE notes SET
       noteTitle = ?, noteBody = ?, bgColor = ?, bgImage = ?,
-      checkBoxes = ?, images = ?, isCbox = ?, labels = ?, archived = ?, trashed = ?, trashedAt = ?, updatedAt = ?, lastEditorUserId = ?, isDemo = ?
+      checkBoxes = ?, images = ?, isCbox = ?, labels = ?, binder = ?, locked = ?, lockSalt = ?, lockHash = ?, archived = ?, trashed = ?, trashedAt = ?, updatedAt = ?, lastEditorUserId = ?, isDemo = ?
      WHERE id = ?`,
     [
       String(next.noteTitle || ''),
@@ -3944,6 +5147,10 @@ app.patch('/api/notes/:id', requireAuth, asyncRoute(async (req, res) => {
       JSON.stringify(next.images || []),
       next.isCbox ? 1 : 0,
       JSON.stringify(next.labels || []),
+      next.binder || '',
+      next.locked ? 1 : 0,
+      next.lockSalt || '',
+      next.lockHash || '',
       next.archived ? 1 : 0,
       next.trashed ? 1 : 0,
       trashedAt,
@@ -3973,8 +5180,8 @@ app.post('/api/notes/:id/clone', requireAuth, asyncRoute(async (req, res) => {
   const note = dbNoteToApi(row);
   const result = await run(
     `INSERT INTO notes
-     (ownerUserId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, isDemo)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (ownerUserId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, binder, locked, lockSalt, lockHash, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, isDemo)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       req.user.id,
       String(note.noteTitle || ''),
@@ -3985,6 +5192,10 @@ app.post('/api/notes/:id/clone', requireAuth, asyncRoute(async (req, res) => {
       JSON.stringify(note.images || []),
       note.isCbox ? 1 : 0,
       JSON.stringify(note.labels || []),
+      note.binder || '',
+      note.locked ? 1 : 0,
+      note.lockSalt || '',
+      note.lockHash || '',
       note.archived ? 1 : 0,
       note.trashed ? 1 : 0,
       note.trashed ? now : null,
@@ -4060,6 +5271,8 @@ app.post('/api/notes/merge', requireAuth, asyncRoute(async (req, res) => {
   }
   const mergedBody = bodyParts.join('<br><br>');
   const mergedLabels = Array.from(labelMap.values());
+  const mergedBinder = apiNotes.find(n => n.binder)?.binder || '';
+  const mergedLock = apiNotes.find(n => n.locked && n.lockSalt && n.lockHash);
   // isCbox=true so the editor's checklist surface activates; the new editor
   // logic will additionally render the body when both are present.
   const isCbox = mergedCheckBoxes.length > 0 ? 1 : 0;
@@ -4069,8 +5282,8 @@ app.post('/api/notes/merge', requireAuth, asyncRoute(async (req, res) => {
   try {
     const result = await run(
       `INSERT INTO notes
-       (ownerUserId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, lastEditorUserId, isDemo)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, ?, ?, ?, ?, 0)`,
+       (ownerUserId, noteTitle, noteBody, bgColor, bgImage, checkBoxes, images, isCbox, labels, binder, locked, lockSalt, lockHash, archived, trashed, trashedAt, sortOrder, createdAt, updatedAt, lastEditorUserId, isDemo)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, ?, ?, ?, ?, 0)`,
       [
         req.user.id,
         String(mergedTitle || ''),
@@ -4081,6 +5294,10 @@ app.post('/api/notes/merge', requireAuth, asyncRoute(async (req, res) => {
         JSON.stringify(mergedImages),
         isCbox,
         JSON.stringify(mergedLabels),
+        mergedBinder,
+        mergedLock ? 1 : 0,
+        mergedLock?.lockSalt || '',
+        mergedLock?.lockHash || '',
         Date.now(),
         now,
         now,
@@ -4192,7 +5409,6 @@ app.patch('/api/notes/labels/:labelId', requireAuth, asyncRoute(async (req, res)
   }
 
   broadcastRealtime([...recipientIds], { type: 'notes-changed', action: 'labels-updated' });
-  await cleanupUnusedLabels(req.user.id);
   res.status(204).end();
 }));
 
@@ -4204,10 +5420,19 @@ app.delete('/api/notes/:id', requireAuth, asyncRoute(async (req, res) => {
   const isOwner = note.ownerUserId === req.user.id;
   if (isOwner) {
     const recipients = await getNoteRecipientIds(noteId);
+    const deletedSnapshot = {
+      syncId: note.syncId || `note-${crypto.randomUUID()}`,
+      ...serverLwwStamp()
+    };
+    deletedSnapshot.lwwPhysicalMs = deletedSnapshot.physicalMs;
+    deletedSnapshot.lwwLogical = deletedSnapshot.logical;
+    deletedSnapshot.lwwDeviceId = deletedSnapshot.deviceId;
+    deletedSnapshot.lwwOperationId = deletedSnapshot.operationId;
+    await recordDependentSyncDeletesForNote(noteId, recipients);
     await deleteAttachmentFilesForNote(noteId);
     await deleteImageFilesForNote(noteId);
     await run('DELETE FROM notes WHERE id = ?', [noteId]);
-    await broadcastNoteChange(noteId, 'deleted', recipients);
+    await broadcastNoteChange(noteId, 'deleted', recipients, { deletedSnapshot });
   } else {
     // If not owner, just remove self as collaborator (unshare).
     // Grant a rejoin token so the snackbar undo flow can re-add them.
@@ -4224,9 +5449,252 @@ app.delete('/api/notes/:id', requireAuth, asyncRoute(async (req, res) => {
 
 // ─── Reminder routes ───────────────────────────────────────────────────────
 
+async function reminderNoteMap(reminders) {
+  const noteIds = [...new Set((reminders || []).map(reminder => Number(reminder.noteId || 0)).filter(Boolean))];
+  if (!noteIds.length) return new Map();
+  const placeholders = noteIds.map(() => '?').join(',');
+  const notes = await all(
+    `SELECT id, noteTitle, noteBody FROM notes WHERE id IN (${placeholders})`,
+    noteIds
+  );
+  return new Map(notes.map(note => [Number(note.id), note]));
+}
+
+function firstDefined(...values) {
+  return values.find(value => value !== undefined);
+}
+
+function normalizeLocationTrigger(value) {
+  const trigger = String(value || '').trim().toLowerCase();
+  return ['leave', 'exit', 'depart', 'departure'].includes(trigger) ? 'leave' : 'arrive';
+}
+
+function normalizeRepeatRule(value) {
+  if (!value) return null;
+  let parsed = value;
+  if (typeof value === 'string') {
+    try { parsed = JSON.parse(value); } catch { return null; }
+  }
+  const type = String(parsed?.type || '').trim();
+  if (!['none', 'daily', 'weekly', 'monthly', 'custom_days'].includes(type)) return null;
+  const intervalDays = Number(parsed.intervalDays || 0);
+  if (type === 'none' && !parsed.moveToTopOnTrigger) return null;
+  return JSON.stringify({
+    type,
+    ...(type === 'custom_days' ? { intervalDays: Number.isFinite(intervalDays) && intervalDays > 0 ? Math.floor(intervalDays) : 1 } : {}),
+    moveToTopOnTrigger: !!parsed.moveToTopOnTrigger
+  });
+}
+
+function parseRepeatRule(value) {
+  if (!value) return null;
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    const normalized = normalizeRepeatRule(parsed);
+    return normalized ? JSON.parse(normalized) : null;
+  } catch {
+    return null;
+  }
+}
+
+function nextRepeatDueAt(dueAtUtc, repeatRule) {
+  if (!dueAtUtc || !repeatRule) return null;
+  if (repeatRule.type === 'none') return null;
+  const next = new Date(dueAtUtc);
+  if (Number.isNaN(next.getTime())) return null;
+  const now = Date.now();
+  let guard = 0;
+  while (next.getTime() <= now && guard < 730) {
+    guard += 1;
+    if (repeatRule.type === 'daily') next.setUTCDate(next.getUTCDate() + 1);
+    else if (repeatRule.type === 'weekly') next.setUTCDate(next.getUTCDate() + 7);
+    else if (repeatRule.type === 'monthly') next.setUTCMonth(next.getUTCMonth() + 1);
+    else next.setUTCDate(next.getUTCDate() + Math.max(1, Number(repeatRule.intervalDays || 1)));
+  }
+  return next.toISOString();
+}
+
+async function floatReminderNoteToTop(userId, noteId) {
+  if (!userId || !noteId) return;
+  const note = await getAccessibleNote(noteId, userId);
+  if (!note || note.trashed || note.archived) return;
+  await run(
+    'INSERT OR REPLACE INTO user_note_positions (userId, noteId, sortOrder) VALUES (?, ?, ?)',
+    [userId, noteId, Date.now()]
+  );
+  broadcastRealtime([userId], { type: 'notes-changed', action: 'reordered' });
+}
+
+function normalizeReminderPayload(body = {}, existing = {}) {
+  const location = body.location && typeof body.location === 'object' ? body.location : {};
+  const repeatRuleRaw = Object.prototype.hasOwnProperty.call(body, 'repeatRule') || Object.prototype.hasOwnProperty.call(body, 'repeat_rule')
+    ? firstDefined(body.repeatRule, body.repeat_rule)
+    : existing.repeatRule;
+  const noteIdRaw = firstDefined(body.noteId, body.note_id, body.noteID, body.note?.id, existing.noteId);
+  const locationNameRaw = firstDefined(
+    body.locationName,
+    body.location_name,
+    body.triggerLocationName,
+    location.displayName,
+    location.locationName,
+    location.name,
+    location.address,
+    existing.locationName
+  );
+  const latitudeRaw = firstDefined(body.latitude, body.lat, location.latitude, location.lat, existing.latitude);
+  const longitudeRaw = firstDefined(body.longitude, body.lng, body.lon, location.longitude, location.lng, location.lon, existing.longitude);
+  const radiusRaw = firstDefined(body.radiusMeters, body.radius_meters, body.radius, location.radiusMeters, location.radius_meters, location.radius, existing.radiusMeters);
+  const triggerRaw = firstDefined(body.locationTrigger, body.location_trigger, body.triggerType, body.geofenceTrigger, location.locationTrigger, location.triggerType, existing.locationTrigger);
+  const dueRaw = firstDefined(body.dueAtUtc, body.due_at_utc, body.dueAt, body.datetime, body.dateTime, existing.dueAtUtc);
+
+  const locationName = locationNameRaw ? String(locationNameRaw) : null;
+  const latitude = latitudeRaw != null ? Number(latitudeRaw) : null;
+  const longitude = longitudeRaw != null ? Number(longitudeRaw) : null;
+  const radiusMeters = radiusRaw != null ? Number(radiusRaw) : (locationName ? 120 : null);
+
+  return {
+    noteId: Number(noteIdRaw || 0) || null,
+    dueAtUtc: dueRaw ? String(dueRaw) : null,
+    timezone: String(firstDefined(body.timezone, body.timeZone, existing.timezone, 'UTC') || 'UTC'),
+    repeatRule: normalizeRepeatRule(repeatRuleRaw),
+    status: firstDefined(body.status, existing.status, 'pending'),
+    title: plainText(firstDefined(body.title, body.notificationTitle, existing.title) || '') || null,
+    body: plainText(firstDefined(body.body, body.notificationBody, body.text, existing.body) || '') || null,
+    imageUrl: String(firstDefined(body.imageUrl, body.image_url, existing.imageUrl) || '') || null,
+    locationName,
+    latitude,
+    longitude,
+    radiusMeters,
+    locationTrigger: normalizeLocationTrigger(triggerRaw)
+  };
+}
+
+function reminderResponse(reminder, notesById = new Map()) {
+  const noteId = Number(reminder.noteId || 0) || null;
+  const note = noteId ? notesById.get(noteId) : null;
+  const explicitTitle = plainText(reminder.title || '');
+  const explicitBody = plainText(reminder.body || '');
+  const noteTitle = plainText(note?.noteTitle || '');
+  const noteBody = plainText(note?.noteBody || '').slice(0, 500);
+  const latitude = reminder.latitude != null ? Number(reminder.latitude) : null;
+  const longitude = reminder.longitude != null ? Number(reminder.longitude) : null;
+  const radiusMeters = reminder.radiusMeters != null ? Number(reminder.radiusMeters) : null;
+  const locationName = reminder.locationName || null;
+  const locationTrigger = normalizeLocationTrigger(reminder.locationTrigger);
+  return {
+    ...reminder,
+    id: Number(reminder.id),
+    syncId: reminder.syncId || '',
+    noteId,
+    dueAtUtc: reminder.dueAtUtc || null,
+    title: explicitTitle || noteTitle || null,
+    body: explicitBody || noteBody || null,
+    locationName,
+    latitude,
+    longitude,
+    radiusMeters,
+    locationTrigger,
+    location: locationName && latitude != null && longitude != null ? {
+      displayName: locationName,
+      name: locationName,
+      latitude,
+      longitude,
+      radiusMeters: radiusMeters ?? 120,
+      triggerType: locationTrigger,
+      locationTrigger
+    } : null,
+    status: reminder.status || 'pending',
+    deepLink: noteId ? `kept://note/${noteId}` : null,
+    lwwPhysicalMs: Number(reminder.lwwPhysicalMs || 0),
+    lwwLogical: Number(reminder.lwwLogical || 0),
+    lwwDeviceId: reminder.lwwDeviceId || 'server',
+    lwwOperationId: reminder.lwwOperationId || ''
+  };
+}
+
+async function recordReminderSyncChange(reminder, operation = 'upsert') {
+  if (!reminder?.syncId) return;
+  const stamp = rowLwwStamp(reminder);
+  await appendSyncChange([reminder.userId], 'reminder', reminder.syncId, operation, operation === 'delete' ? null : reminderResponse(reminder), stamp);
+}
+
+function attachmentResponse(attachment) {
+  return {
+    id: Number(attachment.id),
+    syncId: attachment.syncId || '',
+    noteId: Number(attachment.noteId),
+    originalName: attachment.originalName,
+    fileSize: Number(attachment.fileSize || 0),
+    mimeType: attachment.mimeType,
+    uploadedAt: attachment.uploadedAt,
+    lwwPhysicalMs: Number(attachment.lwwPhysicalMs || 0),
+    lwwLogical: Number(attachment.lwwLogical || 0),
+    lwwDeviceId: attachment.lwwDeviceId || 'server',
+    lwwOperationId: attachment.lwwOperationId || ''
+  };
+}
+
+async function recordAttachmentSyncChange(attachment, operation = 'upsert', recipients) {
+  if (!attachment?.syncId) return;
+  const userIds = recipients || await getNoteRecipientIds(attachment.noteId);
+  await appendSyncChange(
+    userIds,
+    'attachment',
+    attachment.syncId,
+    operation,
+    operation === 'delete' ? { syncId: attachment.syncId, noteId: attachment.noteId } : attachmentResponse(attachment),
+    rowLwwStamp(attachment)
+  );
+}
+
+async function recordDependentSyncDeletesForNote(noteId, recipients) {
+  const reminders = await all('SELECT * FROM reminders WHERE noteId = ?', [noteId]);
+  for (const reminder of reminders) {
+    const stamp = serverLwwStamp();
+    await recordReminderSyncChange({
+      ...reminder,
+      syncId: reminder.syncId || `reminder-${crypto.randomUUID()}`,
+      lwwPhysicalMs: stamp.physicalMs,
+      lwwLogical: stamp.logical,
+      lwwDeviceId: stamp.deviceId,
+      lwwOperationId: stamp.operationId
+    }, 'delete');
+  }
+  const attachments = await all('SELECT * FROM note_attachments WHERE noteId = ?', [noteId]);
+  for (const attachment of attachments) {
+    const stamp = serverLwwStamp();
+    await recordAttachmentSyncChange({
+      ...attachment,
+      syncId: attachment.syncId || `attachment-${crypto.randomUUID()}`,
+      lwwPhysicalMs: stamp.physicalMs,
+      lwwLogical: stamp.logical,
+      lwwDeviceId: stamp.deviceId,
+      lwwOperationId: stamp.operationId
+    }, 'delete', recipients);
+  }
+}
+
+async function enrichReminderResponses(reminders) {
+  const notesById = await reminderNoteMap(reminders);
+  return reminders.map(reminder => reminderResponse(reminder, notesById));
+}
+
+async function enrichReminderResponse(reminder) {
+  return (await enrichReminderResponses([reminder]))[0];
+}
+
+const visibleReminderJoin = 'LEFT JOIN notes reminder_notes ON reminder_notes.id = reminders.noteId';
+const visibleReminderWhere = '(reminders.noteId IS NULL OR (COALESCE(reminder_notes.archived, 0) = 0 AND COALESCE(reminder_notes.trashed, 0) = 0))';
+
 app.get('/api/reminders', requireAuth, asyncRoute(async (req, res) => {
-  const reminders = await all('SELECT * FROM reminders WHERE userId = ? ORDER BY dueAtUtc', [req.user.id]);
-  res.json(reminders);
+  const reminders = await all(
+    `SELECT reminders.* FROM reminders
+     ${visibleReminderJoin}
+     WHERE reminders.userId = ? AND ${visibleReminderWhere}
+     ORDER BY reminders.dueAtUtc`,
+    [req.user.id]
+  );
+  res.json(await enrichReminderResponses(reminders));
 }));
 
 // ─── ICS feed routes ───────────────────────────────────────────────────────
@@ -4250,13 +5718,20 @@ app.post('/api/reminders/ics-token', requireAuth, asyncRoute(async (req, res) =>
 const handleIcsFeed = asyncRoute(async (req, res) => {
   const user = await get('SELECT id FROM users WHERE icsFeedToken = ?', [req.params.token]);
   if (!user) return res.status(404).type('text').send('Feed not found.');
-  const reminders = await all('SELECT * FROM reminders WHERE userId = ? ORDER BY dueAtUtc', [user.id]);
+  const reminders = await all(
+    `SELECT reminders.* FROM reminders
+     ${visibleReminderJoin}
+     WHERE reminders.userId = ? AND ${visibleReminderWhere}
+     ORDER BY reminders.dueAtUtc`,
+    [user.id]
+  );
+  const enrichedReminders = await enrichReminderResponses(reminders);
   res.set({
     'Content-Type': 'text/calendar; charset=utf-8',
     'Content-Disposition': 'attachment; filename="kept-reminders.ics"',
     'Cache-Control': 'no-cache, no-store'
   });
-  res.send(buildIcsFeed(reminders));
+  res.send(buildIcsFeed(enrichedReminders));
 });
 
 // Friendly route: token in the middle, kept-reminders.ics at the end so
@@ -4315,48 +5790,218 @@ app.delete('/api/push/subscriptions', requireAuth, asyncRoute(async (req, res) =
   res.status(204).end();
 }));
 
+function locationSavedPlaceResponse(place) {
+  return {
+    id: Number(place.id),
+    userId: Number(place.userId),
+    name: String(place.name || ''),
+    address: place.address || '',
+    placeType: ['home', 'work', 'gym', 'other'].includes(place.placeType) ? place.placeType : 'other',
+    latitude: Number(place.latitude),
+    longitude: Number(place.longitude),
+    radiusMeters: place.radiusMeters != null ? Number(place.radiusMeters) : 100,
+    locationTrigger: place.locationTrigger === 'leave' ? 'leave' : 'arrive',
+    mapPreviewUrl: place.mapPreviewUrl || null,
+    createdAt: place.createdAt,
+    updatedAt: place.updatedAt
+  };
+}
+
+function parseLocationSavedPlacePayload(body, existing = {}) {
+  const placeTypes = ['home', 'work', 'gym', 'other'];
+  const triggers = ['arrive', 'leave'];
+  const name = body.name !== undefined ? plainText(body.name).slice(0, 120) : existing.name;
+  const address = body.address !== undefined ? plainText(body.address).slice(0, 240) : (existing.address || '');
+  const placeType = placeTypes.includes(body.placeType) ? body.placeType : (existing.placeType || 'other');
+  const latitude = body.latitude !== undefined ? Number(body.latitude) : Number(existing.latitude);
+  const longitude = body.longitude !== undefined ? Number(body.longitude) : Number(existing.longitude);
+  const radiusMeters = body.radiusMeters !== undefined ? Number(body.radiusMeters) : Number(existing.radiusMeters || 100);
+  const locationTrigger = triggers.includes(body.locationTrigger) ? body.locationTrigger : (existing.locationTrigger || 'arrive');
+  const mapPreviewUrl = body.mapPreviewUrl !== undefined ? (String(body.mapPreviewUrl || '') || null) : (existing.mapPreviewUrl || null);
+  if (!name) return { error: 'name is required.' };
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return { error: 'latitude and longitude are required.' };
+  if (!Number.isFinite(radiusMeters) || radiusMeters <= 0) return { error: 'radiusMeters must be positive.' };
+  return { name, address, placeType, latitude, longitude, radiusMeters, locationTrigger, mapPreviewUrl };
+}
+
+app.get('/api/location-saved-places', requireAuth, asyncRoute(async (req, res) => {
+  const places = await all(
+    `SELECT * FROM location_saved_places WHERE userId = ? ORDER BY updatedAt DESC, id DESC`,
+    [req.user.id]
+  );
+  res.json(places.map(locationSavedPlaceResponse));
+}));
+
+app.post('/api/location-saved-places', requireAuth, asyncRoute(async (req, res) => {
+  const parsed = parseLocationSavedPlacePayload(req.body || {});
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const now = new Date().toISOString();
+  const result = await run(
+    `INSERT INTO location_saved_places
+       (userId, name, address, placeType, latitude, longitude, radiusMeters, locationTrigger, mapPreviewUrl, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [req.user.id, parsed.name, parsed.address, parsed.placeType, parsed.latitude, parsed.longitude, parsed.radiusMeters, parsed.locationTrigger, parsed.mapPreviewUrl, now, now]
+  );
+  const place = await get('SELECT * FROM location_saved_places WHERE id = ? AND userId = ?', [result.id, req.user.id]);
+  res.status(201).json(locationSavedPlaceResponse(place));
+}));
+
+app.patch('/api/location-saved-places/:id', requireAuth, asyncRoute(async (req, res) => {
+  const place = await get('SELECT * FROM location_saved_places WHERE id = ? AND userId = ?', [Number(req.params.id), req.user.id]);
+  if (!place) return res.status(404).json({ error: 'Saved place not found.' });
+  const parsed = parseLocationSavedPlacePayload(req.body || {}, place);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const now = new Date().toISOString();
+  await run(
+    `UPDATE location_saved_places
+     SET name = ?, address = ?, placeType = ?, latitude = ?, longitude = ?, radiusMeters = ?, locationTrigger = ?, mapPreviewUrl = ?, updatedAt = ?
+     WHERE id = ? AND userId = ?`,
+    [parsed.name, parsed.address, parsed.placeType, parsed.latitude, parsed.longitude, parsed.radiusMeters, parsed.locationTrigger, parsed.mapPreviewUrl, now, place.id, req.user.id]
+  );
+  const updated = await get('SELECT * FROM location_saved_places WHERE id = ? AND userId = ?', [place.id, req.user.id]);
+  res.json(locationSavedPlaceResponse(updated));
+}));
+
+app.delete('/api/location-saved-places/:id', requireAuth, asyncRoute(async (req, res) => {
+  const place = await get('SELECT * FROM location_saved_places WHERE id = ? AND userId = ?', [Number(req.params.id), req.user.id]);
+  if (!place) return res.status(404).json({ error: 'Saved place not found.' });
+  await run('DELETE FROM location_saved_places WHERE id = ? AND userId = ?', [place.id, req.user.id]);
+  res.status(204).end();
+}));
+
 app.post('/api/reminders', requireAuth, asyncRoute(async (req, res) => {
-  const { noteId, dueAtUtc, timezone, title, body, imageUrl, repeatRule } = req.body;
-  if (!dueAtUtc) return res.status(400).json({ error: 'dueAtUtc is required.' });
-  if (noteId) {
-    const note = await getAccessibleNote(Number(noteId), req.user.id);
+  const payload = normalizeReminderPayload(req.body || {});
+  if (!payload.dueAtUtc && !payload.locationName) return res.status(400).json({ error: 'Either dueAtUtc or locationName is required.' });
+  if (payload.locationName && (payload.latitude == null || payload.longitude == null)) {
+    return res.status(400).json({ error: 'Location reminders require locationName, latitude, and longitude.' });
+  }
+  if (payload.radiusMeters != null && (!Number.isFinite(payload.radiusMeters) || payload.radiusMeters <= 0)) {
+    return res.status(400).json({ error: 'radiusMeters must be positive.' });
+  }
+  const noteIdVal = payload.noteId;
+  if (noteIdVal) {
+    const note = await getAccessibleNote(noteIdVal, req.user.id);
     if (!note) return res.status(404).json({ error: 'Note not found.' });
   }
   const now = new Date().toISOString();
-  const result = await run(
-    `INSERT INTO reminders (noteId, userId, dueAtUtc, timezone, repeatRule, status, title, body, imageUrl, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
-    [noteId || null, req.user.id, String(dueAtUtc), String(timezone || 'UTC'), repeatRule || null,
-     plainText(title) || null, plainText(body) || null, String(imageUrl || '') || null, now, now]
+  const stamp = serverLwwStamp();
+  const syncId = String(req.body.syncId || req.body.clientId || `reminder-${crypto.randomUUID()}`);
+
+  const existing = noteIdVal ? await get('SELECT id FROM reminders WHERE noteId = ?', [noteIdVal]) : null;
+  const reminder = await get(
+    `INSERT INTO reminders (noteId, userId, dueAtUtc, timezone, repeatRule, status, title, body, imageUrl, locationName, latitude, longitude, radiusMeters, locationTrigger, createdAt, updatedAt, syncId, lwwPhysicalMs, lwwLogical, lwwDeviceId, lwwOperationId)
+     VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(noteId) DO UPDATE SET
+       userId = excluded.userId,
+       syncId = COALESCE(reminders.syncId, excluded.syncId),
+       dueAtUtc = excluded.dueAtUtc,
+       timezone = excluded.timezone,
+       repeatRule = excluded.repeatRule,
+       status = 'pending',
+       title = excluded.title,
+       body = excluded.body,
+       imageUrl = excluded.imageUrl,
+       locationName = excluded.locationName,
+       latitude = excluded.latitude,
+       longitude = excluded.longitude,
+       radiusMeters = excluded.radiusMeters,
+       locationTrigger = excluded.locationTrigger,
+       updatedAt = excluded.updatedAt,
+       lwwPhysicalMs = excluded.lwwPhysicalMs,
+       lwwLogical = excluded.lwwLogical,
+       lwwDeviceId = excluded.lwwDeviceId,
+       lwwOperationId = excluded.lwwOperationId
+     RETURNING *`,
+    [
+      noteIdVal,
+      req.user.id,
+      payload.dueAtUtc,
+      payload.timezone,
+      payload.repeatRule,
+      payload.title,
+      payload.body,
+      payload.imageUrl,
+      payload.locationName,
+      payload.latitude,
+      payload.longitude,
+      payload.radiusMeters,
+      payload.locationTrigger,
+      now,
+      now,
+      syncId,
+      stamp.physicalMs,
+      stamp.logical,
+      stamp.deviceId,
+      stamp.operationId
+    ]
   );
-  const reminder = await get('SELECT * FROM reminders WHERE id = ?', [result.id]);
+  await recordReminderSyncChange(reminder, 'upsert');
+  const enrichedReminder = await enrichReminderResponse(reminder);
   const caldav = await get('SELECT * FROM caldav_settings WHERE userId = ? AND enabled = 1', [req.user.id]);
-  if (caldav) pushReminderToCaldav(caldav, reminder).catch(err => console.error('CalDAV push failed:', err.message));
-  gcalPushReminder(req.user.id, reminder).catch(err => console.error('GCal push failed:', err.message));
-  res.status(201).json(reminder);
+  if (caldav) pushReminderToCaldav(caldav, enrichedReminder).catch(err => console.error('CalDAV push failed:', err.message));
+  gcalPushReminder(req.user.id, enrichedReminder).catch(err => console.error('GCal push failed:', err.message));
+  res.status(existing ? 200 : 201).json(enrichedReminder);
 }));
 
 app.patch('/api/reminders/:id', requireAuth, asyncRoute(async (req, res) => {
   const reminder = await get('SELECT * FROM reminders WHERE id = ? AND userId = ?', [Number(req.params.id), req.user.id]);
   if (!reminder) return res.status(404).json({ error: 'Reminder not found.' });
   const now = new Date().toISOString();
+  const stamp = serverLwwStamp();
   const validStatuses = ['pending','fired','dismissed','snoozed'];
-  const status = validStatuses.includes(req.body.status) ? req.body.status : reminder.status;
-  const dueAtUtc = req.body.dueAtUtc || reminder.dueAtUtc;
-  await run(`UPDATE reminders SET status = ?, dueAtUtc = ?, updatedAt = ? WHERE id = ?`, [status, dueAtUtc, now, reminder.id]);
-  const updated = await get('SELECT * FROM reminders WHERE id = ?', [reminder.id]);
-  if (status === 'pending') {
-    const caldav = await get('SELECT * FROM caldav_settings WHERE userId = ? AND enabled = 1', [req.user.id]);
-    if (caldav) pushReminderToCaldav(caldav, updated).catch(err => console.error('CalDAV push failed:', err.message));
-    gcalPushReminder(req.user.id, updated).catch(err => console.error('GCal push failed:', err.message));
+  const payload = normalizeReminderPayload(req.body || {}, reminder);
+  const status = validStatuses.includes(payload.status) ? payload.status : reminder.status;
+  const dueAtUtc = payload.dueAtUtc;
+  const locationName = payload.locationName;
+  const latitude = payload.latitude;
+  const longitude = payload.longitude;
+  const radiusMeters = payload.radiusMeters;
+  const locationTrigger = payload.locationTrigger;
+  const repeatRule = payload.repeatRule;
+  const repeat = status === 'fired' ? parseRepeatRule(repeatRule) : null;
+  const rolledDueAtUtc = repeat ? nextRepeatDueAt(dueAtUtc, repeat) : null;
+  const finalStatus = rolledDueAtUtc ? 'pending' : status;
+  const finalDueAtUtc = rolledDueAtUtc || dueAtUtc;
+
+  if (!finalDueAtUtc && !locationName) return res.status(400).json({ error: 'Either dueAtUtc or locationName is required.' });
+  if (locationName && (latitude == null || longitude == null)) {
+    return res.status(400).json({ error: 'Location reminders require locationName, latitude, and longitude.' });
   }
-  res.json(updated);
+  if (radiusMeters != null && (!Number.isFinite(radiusMeters) || radiusMeters <= 0)) {
+    return res.status(400).json({ error: 'radiusMeters must be positive.' });
+  }
+
+  await run(
+    `UPDATE reminders SET
+       status = ?, dueAtUtc = ?, repeatRule = ?, locationName = ?, latitude = ?, longitude = ?, radiusMeters = ?, locationTrigger = ?, updatedAt = ?,
+       lwwPhysicalMs = ?, lwwLogical = ?, lwwDeviceId = ?, lwwOperationId = ?,
+       syncId = CASE WHEN syncId IS NULL OR syncId = '' THEN ? ELSE syncId END
+     WHERE id = ?`,
+    [finalStatus, finalDueAtUtc, repeatRule, locationName, latitude, longitude, radiusMeters, locationTrigger, now, stamp.physicalMs, stamp.logical, stamp.deviceId, stamp.operationId, `reminder-${crypto.randomUUID()}`, reminder.id]
+  );
+  const updated = await get('SELECT * FROM reminders WHERE id = ?', [reminder.id]);
+  await recordReminderSyncChange(updated, 'upsert');
+  const enrichedUpdated = await enrichReminderResponse(updated);
+  if ((rolledDueAtUtc || finalStatus === 'fired') && repeat?.moveToTopOnTrigger) await floatReminderNoteToTop(req.user.id, reminder.noteId);
+  if (finalStatus === 'pending') {
+    const caldav = await get('SELECT * FROM caldav_settings WHERE userId = ? AND enabled = 1', [req.user.id]);
+    if (caldav) pushReminderToCaldav(caldav, enrichedUpdated).catch(err => console.error('CalDAV push failed:', err.message));
+    gcalPushReminder(req.user.id, enrichedUpdated).catch(err => console.error('GCal push failed:', err.message));
+  }
+  res.json(enrichedUpdated);
 }));
 
 app.delete('/api/reminders/:id', requireAuth, asyncRoute(async (req, res) => {
   const reminder = await get('SELECT * FROM reminders WHERE id = ? AND userId = ?', [Number(req.params.id), req.user.id]);
   if (!reminder) return res.status(404).json({ error: 'Reminder not found.' });
+  const stamp = serverLwwStamp();
+  reminder.syncId = reminder.syncId || `reminder-${crypto.randomUUID()}`;
+  reminder.lwwPhysicalMs = stamp.physicalMs;
+  reminder.lwwLogical = stamp.logical;
+  reminder.lwwDeviceId = stamp.deviceId;
+  reminder.lwwOperationId = stamp.operationId;
   await run('DELETE FROM reminders WHERE id = ?', [reminder.id]);
+  await recordReminderSyncChange(reminder, 'delete');
   const caldav = await get('SELECT * FROM caldav_settings WHERE userId = ? AND enabled = 1', [req.user.id]);
   if (caldav) deleteReminderFromCaldav(caldav, reminder.id).catch(err => console.error('CalDAV delete failed:', err.message));
   gcalDeleteReminder(req.user.id, reminder).catch(err => console.error('GCal delete failed:', err.message));
@@ -4405,10 +6050,16 @@ app.put('/api/caldav/settings', requireAuth, asyncRoute(async (req, res) => {
 
 async function backfillCaldavReminders(settings) {
   const reminders = await all(
-    `SELECT * FROM reminders WHERE userId = ? AND status = 'pending' ORDER BY dueAtUtc`,
+    `SELECT reminders.* FROM reminders
+     ${visibleReminderJoin}
+     WHERE reminders.userId = ?
+     AND reminders.status = 'pending'
+     AND ${visibleReminderWhere}
+     ORDER BY reminders.dueAtUtc`,
     [settings.userId]
   );
-  for (const reminder of reminders) {
+  const enrichedReminders = await enrichReminderResponses(reminders);
+  for (const reminder of enrichedReminders) {
     try {
       await pushReminderToCaldav(settings, reminder);
     } catch (err) {
@@ -4530,10 +6181,17 @@ async function backfillGoogleCalendarReminders(userId) {
   const token = await getValidGoogleToken(userId);
   if (!token) return;
   const reminders = await all(
-    `SELECT * FROM reminders WHERE userId = ? AND status = 'pending' AND gcalEventId IS NULL ORDER BY dueAtUtc`,
+    `SELECT reminders.* FROM reminders
+     ${visibleReminderJoin}
+     WHERE reminders.userId = ?
+     AND reminders.status = 'pending'
+     AND reminders.gcalEventId IS NULL
+     AND ${visibleReminderWhere}
+     ORDER BY reminders.dueAtUtc`,
     [userId]
   );
-  for (const reminder of reminders) {
+  const enrichedReminders = await enrichReminderResponses(reminders);
+  for (const reminder of enrichedReminders) {
     try {
       await gcalCreateAndStore(userId, reminder, token);
     } catch (err) {
@@ -5083,9 +6741,49 @@ const KEEP_COLOR_MAP = {
   BROWN: '#fddcbb',
 };
 
+function parseByteSize(value, fallbackBytes) {
+  if (value === undefined || value === null || value === '') return fallbackBytes;
+  const raw = String(value).trim();
+  const match = raw.match(/^(\d+(?:\.\d+)?)\s*(b|kb|kib|mb|mib|gb|gib)?$/i);
+  if (!match) return fallbackBytes;
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return fallbackBytes;
+  const unit = String(match[2] || 'b').toLowerCase();
+  const multiplier = unit === 'gb' || unit === 'gib'
+    ? 1024 ** 3
+    : unit === 'mb' || unit === 'mib'
+      ? 1024 ** 2
+      : unit === 'kb' || unit === 'kib'
+        ? 1024
+        : 1;
+  return Math.floor(amount * multiplier);
+}
+
+function formatBytes(bytes) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = Number(bytes) || 0;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex++;
+  }
+  return `${value >= 10 || unitIndex === 0 ? Math.round(value) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+const TAKEOUT_UPLOAD_MAX_BYTES = parseByteSize(
+  process.env.KEPT_TAKEOUT_UPLOAD_MAX || process.env.KEPT_TAKEOUT_UPLOAD_MAX_BYTES,
+  5 * 1024 * 1024 * 1024
+);
+
 const uploadZip = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 500 * 1024 * 1024 },
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, takeoutTmpDir),
+    filename: (_req, file, cb) => {
+      const originalExt = path.extname(file.originalname || '').toLowerCase() || '.zip';
+      cb(null, `takeout-${Date.now()}-${randomHex(12)}${originalExt}`);
+    }
+  }),
+  limits: { fileSize: TAKEOUT_UPLOAD_MAX_BYTES },
   fileFilter: (_req, file, cb) => {
     const ok = file.mimetype === 'application/zip'
       || file.mimetype === 'application/x-zip-compressed'
@@ -5094,12 +6792,44 @@ const uploadZip = multer({
   }
 });
 
+function googleTakeoutUpload(req, res, next) {
+  uploadZip.single('takeout')(req, res, (error) => {
+    if (!error) return next();
+    if (req.file?.path) fs.promises.unlink(req.file.path).catch(() => {});
+    if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({
+        error: `Google Takeout ZIP is too large for this Kept server. The current Takeout upload limit is ${formatBytes(TAKEOUT_UPLOAD_MAX_BYTES)}. If this failed below that size, your proxy/CDN may be rejecting the upload before Kept receives it. Try importing over a direct LAN/SSH connection or raise your proxy upload limit.`
+      });
+    }
+    if (error.message === 'Only ZIP files are supported.') {
+      return res.status(400).json({ error: error.message });
+    }
+    next(error);
+  });
+}
+
+async function cleanupStaleTakeoutUploads(maxAgeMs = 24 * 60 * 60 * 1000) {
+  try {
+    const files = await fs.promises.readdir(takeoutTmpDir);
+    const cutoff = Date.now() - maxAgeMs;
+    await Promise.all(files.map(async (file) => {
+      const filePath = path.join(takeoutTmpDir, file);
+      const stat = await fs.promises.stat(filePath).catch(() => null);
+      if (stat?.isFile() && stat.mtimeMs < cutoff) {
+        await fs.promises.unlink(filePath).catch(() => {});
+      }
+    }));
+  } catch (error) {
+    console.warn('Takeout temp cleanup failed:', error.message);
+  }
+}
+
 // Limits for Google Takeout zips. Real Keep exports are usually well under
 // these caps; the goal is to prevent zip bombs and path-traversal entries
 // without breaking large legitimate exports.
-const TAKEOUT_MAX_ENTRIES = 50_000;
-const TAKEOUT_MAX_PER_ENTRY_BYTES = 100 * 1024 * 1024;     // 100 MB per file
-const TAKEOUT_MAX_TOTAL_BYTES = 5 * 1024 * 1024 * 1024;    // 5 GB combined
+const TAKEOUT_MAX_ENTRIES = 100_000;
+const TAKEOUT_MAX_PER_ENTRY_BYTES = 250 * 1024 * 1024;     // 250 MB per file
+const TAKEOUT_MAX_TOTAL_BYTES = 10 * 1024 * 1024 * 1024;   // 10 GB combined
 const TAKEOUT_MAX_FILENAME_LEN = 1024;
 
 function normalizeZipEntryName(name) {
@@ -5123,13 +6853,78 @@ function isKeepJsonEntry(entry) {
   return !entry.isDirectory && /(^|\/)(?:Takeout\/)?Keep\/[^/]+\.json$/i.test(entry.entryName);
 }
 
-async function readZipEntries(buffer) {
+function keepListText(item) {
+  return String(item?.text ?? item?.title ?? item?.data ?? item?.name ?? '');
+}
+
+function keepListIndentFromValue(value) {
+  if (value === true) return 1;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? 1 : 0;
+}
+
+function keepListIndentLevel(item, fallbackLevel = 0) {
+  const explicitKeys = [
+    'indentLevel',
+    'indentationLevel',
+    'indent',
+    'level',
+    'depth',
+    'nestingLevel',
+    'childLevel'
+  ];
+  for (const key of explicitKeys) {
+    if (item && item[key] !== undefined && item[key] !== null) {
+      return keepListIndentFromValue(item[key]);
+    }
+  }
+
+  const parentKeys = ['parentId', 'parentItemId', 'parentListItemId', 'superListItemId', 'parent'];
+  if (parentKeys.some(key => item && item[key] !== undefined && item[key] !== null && item[key] !== '')) return 1;
+
+  const text = keepListText(item);
+  if (/^(?:\t| {2,}|\u00a0{2,})/.test(text)) return 1;
+
+  return keepListIndentFromValue(fallbackLevel);
+}
+
+function keepListChildren(item) {
+  for (const key of ['children', 'childItems', 'subitems', 'subItems', 'items', 'listContent']) {
+    if (Array.isArray(item?.[key]) && item[key].length) return item[key];
+  }
+  return [];
+}
+
+function importedKeepChecklistItems(listContent, fallbackLevel = 0, state = { nextId: 0 }) {
+  const checkBoxes = [];
+  if (!Array.isArray(listContent)) return checkBoxes;
+
+  for (const item of listContent) {
+    const rawText = keepListText(item);
+    const indentLevel = keepListIndentLevel(item, fallbackLevel);
+    checkBoxes.push({
+      id: state.nextId++,
+      data: escapeHtml(rawText.replace(/^(?:\t| {2,}|\u00a0{2,})/, '')),
+      done: !!(item?.isChecked ?? item?.checked ?? item?.done),
+      indentLevel
+    });
+
+    const children = keepListChildren(item);
+    if (children.length) {
+      checkBoxes.push(...importedKeepChecklistItems(children, 1, state));
+    }
+  }
+
+  return checkBoxes;
+}
+
+async function readZipEntries(filePath) {
   let admZipError;
   let rawEntries;
   let getRawData;
   try {
     const AdmZip = require('adm-zip');
-    const zip = new AdmZip(buffer);
+    const zip = new AdmZip(filePath);
     rawEntries = zip.getEntries();
     getRawData = (entry) => entry.getData();
   } catch (error) {
@@ -5139,7 +6934,7 @@ async function readZipEntries(buffer) {
   if (!rawEntries) {
     try {
       const unzipper = require('unzipper');
-      const directory = await unzipper.Open.buffer(buffer);
+      const directory = await unzipper.Open.file(filePath);
       rawEntries = directory.files.map(file => ({
         entryName: file.path,
         isDirectory: file.type === 'Directory' || /\/$/.test(file.path),
@@ -5171,11 +6966,11 @@ async function readZipEntries(buffer) {
         const data = await getRawData(raw);
         if (!data) return Buffer.alloc(0);
         if (data.length > TAKEOUT_MAX_PER_ENTRY_BYTES) {
-          throw new Error(`Entry "${normalized}" is too large (${data.length} bytes). Max ${TAKEOUT_MAX_PER_ENTRY_BYTES}.`);
+          throw new Error(`Entry "${normalized}" is too large (${formatBytes(data.length)}). Max ${formatBytes(TAKEOUT_MAX_PER_ENTRY_BYTES)}.`);
         }
         totalExtracted += data.length;
         if (totalExtracted > TAKEOUT_MAX_TOTAL_BYTES) {
-          throw new Error('ZIP expands beyond the safe extraction limit (possible zip bomb).');
+          throw new Error(`ZIP expands beyond the safe extraction limit (${formatBytes(TAKEOUT_MAX_TOTAL_BYTES)}).`);
         }
         return data;
       }
@@ -5184,155 +6979,174 @@ async function readZipEntries(buffer) {
   return entries;
 }
 
-app.post('/api/import/google-takeout', requireAuth, uploadZip.single('takeout'), asyncRoute(async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
-
-  let entries;
+app.post('/api/import/google-takeout', requireAuth, googleTakeoutUpload, asyncRoute(async (req, res) => {
+  const tempPath = req.file?.path;
   try {
-    entries = await readZipEntries(req.file.buffer);
-  } catch (error) {
-    return res.status(400).json({ error: error.message });
-  }
+    if (!req.file || !tempPath) return res.status(400).json({ error: 'No file uploaded.' });
 
-  const attachmentsByName = {};
-  for (const e of entries) {
-    if (!e.isDirectory) attachmentsByName[path.basename(e.entryName)] = e;
-  }
-
-  const jsonEntries = entries.filter(isKeepJsonEntry);
-  if (!jsonEntries.length) {
-    return res.status(400).json({ error: 'No Google Keep notes found in this ZIP. Upload the full Takeout ZIP that contains Takeout/Keep/*.json files.' });
-  }
-
-  let imported = 0, skipped = 0, errors = 0, pinnedCount = 0, deduped = 0;
-  const now = new Date().toISOString();
-  const fieldPresence = { isPinned: 0, pinned: 0, isArchived: 0, archived: 0 };
-
-  // Build a fingerprint set of existing notes for this user so re-running
-  // the takeout import doesn't silently double everything. Fingerprint =
-  // createdAt + first 200 chars of title + body, which Google's exports
-  // keep stable across re-exports.
-  const existingFingerprints = new Set();
-  const existingRows = await all('SELECT noteTitle, noteBody, createdAt FROM notes WHERE ownerUserId = ?', [req.user.id]);
-  for (const row of existingRows) {
-    const fp = `${row.createdAt}|${(row.noteTitle || '').slice(0, 200)}|${(row.noteBody || '').slice(0, 200)}`;
-    existingFingerprints.add(fp);
-  }
-
-  await run('BEGIN IMMEDIATE TRANSACTION');
-  try {
-    for (const entry of jsonEntries) {
-      try {
-        let note;
-        try { note = JSON.parse((await entry.getData()).toString('utf8')); }
-        catch (e) {
-          if (e && /zip bomb|too many entries|too large|unsafe entry/i.test(e.message)) throw e;
-          errors++; continue;
-        }
-
-        if (note.isTrashed) { skipped++; continue; }
-
-        const bgColor = KEEP_COLOR_MAP[note.color] ?? '';
-
-        let noteBody = '';
-        if (note.textContent) {
-          noteBody = note.textContent
-            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-            .replace(/\n/g, '<br>');
-        }
-        if (note.annotations?.length) {
-          const links = note.annotations
-            .filter(a => a.url)
-            .map(a => `<a href="${a.url}" target="_blank" rel="noopener">${a.title || a.url}</a>`)
-            .join('<br>');
-          if (links) noteBody = noteBody ? `${noteBody}<br>${links}` : links;
-        }
-
-        let isCbox = 0, checkBoxes = [];
-        if (note.listContent?.length) {
-          isCbox = 1;
-          checkBoxes = note.listContent.map((item, i) => ({
-            id: `imp-${Date.now()}-${i}`,
-            data: (item.text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
-            done: item.isChecked || false
-          }));
-        }
-
-        const images = [];
-        for (const att of (note.attachments || [])) {
-          const attMimeType = String(att.mimetype || '').toLowerCase();
-          if (!SAFE_IMAGE_TYPES.has(attMimeType)) continue;
-          const basename = path.basename(att.filePath || '');
-          const attEntry = attachmentsByName[basename];
-          if (!attEntry) continue;
-          try {
-            const ext = SAFE_IMAGE_TYPES.get(attMimeType);
-            const filename = `${Date.now()}-${randomHex(12)}${ext}`;
-            const data = await attEntry.getData();
-            fs.writeFileSync(path.join(uploadDir, filename), data);
-            images.push({ id: `img-${Date.now()}`, dataUrl: `${PRIVATE_IMAGE_PREFIX}${filename}`, name: basename, placement: 'top' });
-          } catch (e) {
-            if (e && /zip bomb|too many entries|too large|unsafe entry/i.test(e.message)) throw e;
-            /* skip image */
-          }
-        }
-
-        const labels = (note.labels || []).map(l => ({ name: l.name, added: true }));
-        const createdAt = note.createdTimestampUsec ? new Date(note.createdTimestampUsec / 1000).toISOString() : now;
-        const updatedAt = note.userEditedTimestampUsec ? new Date(note.userEditedTimestampUsec / 1000).toISOString() : now;
-
-        // Skip notes that look like a re-import of something already present.
-        const noteTitle = plainText(note.title || '') || '';
-        const fingerprint = `${createdAt}|${noteTitle.slice(0, 200)}|${noteBody.slice(0, 200)}`;
-        if (existingFingerprints.has(fingerprint)) { deduped++; continue; }
-        existingFingerprints.add(fingerprint);
-
-        // Google Keep Takeout uses `isPinned`; older or third-party exports
-        // sometimes use `pinned`. Accept either to avoid silently dropping pins.
-        if ('isPinned' in note) fieldPresence.isPinned++;
-        if ('pinned' in note) fieldPresence.pinned++;
-        if ('isArchived' in note) fieldPresence.isArchived++;
-        if ('archived' in note) fieldPresence.archived++;
-        const pinnedFlag = (note.isPinned || note.pinned) ? 1 : 0;
-        const archivedFlag = (note.isArchived || note.archived) ? 1 : 0;
-        if (pinnedFlag) pinnedCount++;
-        // Keep imported notes in their original Keep recency order instead of
-        // treating the import itself as the note date.
-        const importSortOrder = new Date(updatedAt || createdAt || now).getTime() || Date.now();
-        const insertResult = await run(
-          `INSERT INTO notes (ownerUserId, noteTitle, noteBody, pinned, bgColor, bgImage, checkBoxes, images, isCbox, labels, archived, trashed, sortOrder, createdAt, updatedAt)
-           VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
-          [req.user.id, noteTitle, noteBody, pinnedFlag, bgColor,
-           JSON.stringify(checkBoxes), JSON.stringify(images), isCbox, JSON.stringify(labels),
-           archivedFlag, importSortOrder, createdAt, updatedAt]
-        );
-        // The /api/notes endpoint resolves `pinned` from the per-user
-        // `user_pins` table, not the legacy `notes.pinned` column. Without
-        // this insert, takeout-imported pinned notes would never appear
-        // pinned in the UI.
-        if (pinnedFlag) {
-          await run('INSERT OR IGNORE INTO user_pins (userId, noteId) VALUES (?, ?)', [req.user.id, insertResult.id]);
-        }
-        await syncNoteImagesForNote(insertResult.id, req.user.id, { noteBody, images });
-        imported++;
-      } catch (e) { console.error('Takeout import error:', entry.entryName, e.message); errors++; }
-    }
-    await run('COMMIT');
-  } catch (error) {
-    await run('ROLLBACK');
-    if (error && /zip bomb|too many entries|too large|unsafe entry/i.test(error.message)) {
+    let entries;
+    try {
+      entries = await readZipEntries(tempPath);
+    } catch (error) {
       return res.status(400).json({ error: error.message });
     }
-    throw error;
+
+    const attachmentsByName = {};
+    for (const e of entries) {
+      if (!e.isDirectory) attachmentsByName[path.basename(e.entryName)] = e;
+    }
+
+    const jsonEntries = entries.filter(isKeepJsonEntry);
+    if (!jsonEntries.length) {
+      return res.status(400).json({ error: 'No Google Keep notes found in this ZIP. Upload the full Takeout ZIP that contains Takeout/Keep/*.json files. If your ZIP is large and this appears incorrectly, try importing over a direct LAN/SSH connection because some proxies/CDNs reject large uploads before Kept can inspect them.' });
+    }
+
+    let imported = 0, skipped = 0, errors = 0, pinnedCount = 0, deduped = 0;
+    const now = new Date().toISOString();
+    const fieldPresence = { isPinned: 0, pinned: 0, isArchived: 0, archived: 0 };
+
+    // Build a fingerprint set of existing notes for this user so re-running
+    // the takeout import doesn't silently double everything. Fingerprint =
+    // createdAt + first 200 chars of title + body, which Google's exports
+    // keep stable across re-exports.
+    const existingFingerprints = new Set();
+    const existingRows = await all('SELECT noteTitle, noteBody, createdAt FROM notes WHERE ownerUserId = ?', [req.user.id]);
+    for (const row of existingRows) {
+      const fp = `${row.createdAt}|${(row.noteTitle || '').slice(0, 200)}|${(row.noteBody || '').slice(0, 200)}`;
+      existingFingerprints.add(fp);
+    }
+
+    await run('BEGIN IMMEDIATE TRANSACTION');
+    try {
+      for (const entry of jsonEntries) {
+        try {
+          let note;
+          try { note = JSON.parse((await entry.getData()).toString('utf8')); }
+          catch (e) {
+            if (e && /zip bomb|too many entries|too large|unsafe entry/i.test(e.message)) throw e;
+            errors++; continue;
+          }
+
+          if (note.isTrashed) { skipped++; continue; }
+
+          const bgColor = KEEP_COLOR_MAP[note.color] ?? '';
+
+          let noteBody = '';
+          if (note.textContent) {
+            noteBody = note.textContent
+              .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+              .replace(/\n/g, '<br>');
+          }
+          if (note.annotations?.length) {
+            const links = note.annotations
+              .filter(a => a.url)
+              .map(a => `<a href="${a.url}" target="_blank" rel="noopener">${a.title || a.url}</a>`)
+              .join('<br>');
+            if (links) noteBody = noteBody ? `${noteBody}<br>${links}` : links;
+          }
+
+          let isCbox = 0, checkBoxes = [];
+          if (note.listContent?.length) {
+            isCbox = 1;
+            checkBoxes = importedKeepChecklistItems(note.listContent);
+          }
+
+          const images = [];
+          for (const att of (note.attachments || [])) {
+            const attMimeType = String(att.mimetype || '').toLowerCase();
+            if (!SAFE_IMAGE_TYPES.has(attMimeType)) continue;
+            const basename = path.basename(att.filePath || '');
+            const attEntry = attachmentsByName[basename];
+            if (!attEntry) continue;
+            try {
+              const ext = SAFE_IMAGE_TYPES.get(attMimeType);
+              const filename = `${Date.now()}-${randomHex(12)}${ext}`;
+              const data = await attEntry.getData();
+              fs.writeFileSync(path.join(uploadDir, filename), data);
+              images.push({ id: `img-${Date.now()}`, dataUrl: `${PRIVATE_IMAGE_PREFIX}${filename}`, name: basename, placement: 'top' });
+            } catch (e) {
+              if (e && /zip bomb|too many entries|too large|unsafe entry/i.test(e.message)) throw e;
+              /* skip image */
+            }
+          }
+
+          const labels = [];
+          const seenLabels = new Set();
+          for (const rawLabel of (note.labels || [])) {
+            const labelName = String(rawLabel?.name || '').trim();
+            if (!labelName) continue;
+            const labelKey = labelName.toLowerCase();
+            if (seenLabels.has(labelKey)) continue;
+            seenLabels.add(labelKey);
+            const label = await findOrCreateLabelForUser(req.user.id, labelName);
+            labels.push({ id: label.id, name: label.name, added: true });
+          }
+          const createdAt = note.createdTimestampUsec ? new Date(note.createdTimestampUsec / 1000).toISOString() : now;
+          const updatedAt = note.userEditedTimestampUsec ? new Date(note.userEditedTimestampUsec / 1000).toISOString() : now;
+
+          // Skip notes that look like a re-import of something already present.
+          const noteTitle = plainText(note.title || '') || '';
+          const fingerprint = `${createdAt}|${noteTitle.slice(0, 200)}|${noteBody.slice(0, 200)}`;
+          if (existingFingerprints.has(fingerprint)) { deduped++; continue; }
+          existingFingerprints.add(fingerprint);
+
+          // Google Keep Takeout uses `isPinned`; older or third-party exports
+          // sometimes use `pinned`. Accept either to avoid silently dropping pins.
+          if ('isPinned' in note) fieldPresence.isPinned++;
+          if ('pinned' in note) fieldPresence.pinned++;
+          if ('isArchived' in note) fieldPresence.isArchived++;
+          if ('archived' in note) fieldPresence.archived++;
+          const pinnedFlag = (note.isPinned || note.pinned) ? 1 : 0;
+          const archivedFlag = (note.isArchived || note.archived) ? 1 : 0;
+          if (pinnedFlag) pinnedCount++;
+          // Keep imported notes in their original Keep recency order instead of
+          // treating the import itself as the note date.
+          const importSortOrder = new Date(updatedAt || createdAt || now).getTime() || Date.now();
+          const lww = serverLwwStamp();
+          const insertResult = await run(
+            `INSERT INTO notes (ownerUserId, syncId, noteTitle, noteBody, pinned, bgColor, bgImage, checkBoxes, images, isCbox, labels, binder, archived, trashed, sortOrder, createdAt, updatedAt, lastEditorUserId, lwwPhysicalMs, lwwLogical, lwwDeviceId, lwwOperationId)
+             VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, '', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [req.user.id, `note-${crypto.randomUUID()}`, noteTitle, noteBody, pinnedFlag, bgColor,
+             JSON.stringify(checkBoxes), JSON.stringify(images), isCbox, JSON.stringify(labels),
+             archivedFlag, importSortOrder, createdAt, updatedAt, req.user.id,
+             lww.physicalMs, lww.logical, lww.deviceId, lww.operationId]
+          );
+          // The /api/notes endpoint resolves `pinned` from the per-user
+          // `user_pins` table, not the legacy `notes.pinned` column. Without
+          // this insert, takeout-imported pinned notes would never appear
+          // pinned in the UI.
+          if (pinnedFlag) {
+            await run('INSERT OR IGNORE INTO user_pins (userId, noteId) VALUES (?, ?)', [req.user.id, insertResult.id]);
+          }
+          await syncNoteImagesForNote(insertResult.id, req.user.id, { noteBody, images });
+          await recordNoteSyncChange(insertResult.id, 'upsert', [req.user.id]);
+          imported++;
+        } catch (e) {
+          console.error('Takeout import error:', entry.entryName, e.message);
+          errors++;
+        }
+      }
+      await run('COMMIT');
+    } catch (error) {
+      await run('ROLLBACK');
+      if (error && /zip bomb|too many entries|too large|unsafe entry/i.test(error.message)) {
+        return res.status(400).json({ error: error.message });
+      }
+      throw error;
+    }
+
+    console.log(
+      `[Takeout import] user=${req.user.id} total=${jsonEntries.length} imported=${imported} skipped=${skipped} deduped=${deduped} errors=${errors} pinned=${pinnedCount}`,
+      'fields=', fieldPresence
+    );
+
+    broadcastRealtime([req.user.id], { type: 'notes-changed' });
+    res.json({ imported, skipped, deduped, errors, pinnedCount, total: jsonEntries.length, fieldPresence });
+  } finally {
+    if (tempPath) {
+      fs.promises.unlink(tempPath).catch(() => {});
+    }
   }
-
-  console.log(
-    `[Takeout import] user=${req.user.id} total=${jsonEntries.length} imported=${imported} skipped=${skipped} deduped=${deduped} errors=${errors} pinned=${pinnedCount}`,
-    'fields=', fieldPresence
-  );
-
-  broadcastRealtime([req.user.id], { type: 'notes-changed' });
-  res.json({ imported, skipped, deduped, errors, pinnedCount, total: jsonEntries.length, fieldPresence });
 }));
 
 if (fs.existsSync(staticDir)) {
@@ -5344,7 +7158,9 @@ if (fs.existsSync(staticDir)) {
 
 app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) {
-    const message = error.code === 'LIMIT_FILE_SIZE' ? 'File is too large.' : error.message;
+    const message = error.code === 'LIMIT_FILE_SIZE'
+      ? 'File is too large for this upload.'
+      : error.message;
     return res.status(400).json({ error: message });
   }
   if (String(error?.message || '').startsWith('Only PNG, JPG, GIF, and WEBP uploads are supported.') || error.message === 'Only ZIP files are supported.' || error.message === 'This file type is not allowed. Supported formats: PDF, Office documents, text files, and archives.') {
@@ -5363,6 +7179,7 @@ init().then(() => {
   setupRealtime();
   startReminderScheduler();
   startBackupScheduler();
+  cleanupStaleTakeoutUploads();
   server.listen(port, () => {
     console.log(`Keep API listening on http://127.0.0.1:${port}`);
     console.log(`Keep realtime listening on ws://127.0.0.1:${port}/api/realtime`);

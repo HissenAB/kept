@@ -36,10 +36,12 @@ export class NavbarComponent implements OnInit {
 
   @ViewChild("form23zSaZ") form23zSaZ?: ElementRef<HTMLDivElement>
   @ViewChild("searchInput") searchInput?: ElementRef<HTMLInputElement>
+  @ViewChild("filtersContainer") filtersContainer?: ElementRef<HTMLElement>
   @HostBinding('class.scrolled') isScrolled = false
   isProfileOpen = false
   profileError = ''
   labelMenuError = ''
+  binderMenuError = ''
   avatarPreview = ''
   avatarPresetPreview = 'cat'
   newPassword = ''
@@ -71,6 +73,18 @@ export class NavbarComponent implements OnInit {
 
   get selectedCount() {
     return this.Shared.selectedNoteIds.value.length
+  }
+
+  get canSetSelectedReminder() {
+    return this.selectedCount === 1
+  }
+
+  get isBinderRoute() {
+    return this.router.url.split('?')[0].split('#')[0].startsWith('/binder/')
+  }
+
+  setSearchScope(scope: 'all' | 'current') {
+    this.Shared.setSearchScope(scope)
   }
 
   closeSideBar() { this.Shared.closeSideBar.next(true) }
@@ -112,7 +126,7 @@ export class NavbarComponent implements OnInit {
     this.Shared.setSearchQuery(next)
     if (this.searchInput) {
       this.searchInput.nativeElement.value = next
-      this.searchInput.nativeElement.focus()
+      this.searchInput.nativeElement.blur()
     }
   }
 
@@ -150,6 +164,7 @@ export class NavbarComponent implements OnInit {
     const current = this.Shared.searchQuery
     const next = current.split(/\s+/).filter(t => !t.startsWith('!')).join(' ').trim()
     this.Shared.setSearchQuery(next)
+    this.isFiltersOpen = false
   }
 
   toggleFilter(code: string) {
@@ -182,12 +197,21 @@ export class NavbarComponent implements OnInit {
 
   openSelectionMore(button: HTMLElement, tooltipEl: HTMLDivElement) {
     this.selectionMoreButton = button
-    this.openTooltip(button, tooltipEl)
+    if (tooltipEl.dataset['isTooltipOpen'] === 'true') {
+      this.Shared.closeTooltip(tooltipEl)
+      return
+    }
+    this.Shared.createTooltip(button, tooltipEl, 'bottom-end')
   }
 
   selectionColorMenu = {
     bgColor: (data: bgColors) => this.Shared.bulkUpdateSelected({ bgColor: data, bgImage: '' }),
     bgImage: (data: bgImages) => this.Shared.bulkUpdateSelected({ bgImage: data ? `url(${data})` : '' })
+  }
+
+  openSelectedReminder() {
+    if (!this.canSetSelectedReminder) return
+    this.Shared.openSelectedReminder.next()
   }
 
   selectionMoreMenu(tooltipEl: HTMLDivElement) {
@@ -199,12 +223,42 @@ export class NavbarComponent implements OnInit {
         this.labelMenuError = ''
         this.Shared.createTooltip(this.selectionMoreButton!, labelTooltipEl)
       },
+      openBinderMenu: (binderTooltipEl: HTMLDivElement, labelTooltipEl?: HTMLDivElement) => {
+        this.Shared.closeTooltip(tooltipEl)
+        if (labelTooltipEl) this.Shared.closeTooltip(labelTooltipEl)
+        this.binderMenuError = ''
+        this.Shared.createTooltip(this.selectionMoreButton!, binderTooltipEl)
+      },
       openMerge: () => {
         this.Shared.closeTooltip(tooltipEl)
         this.openMergeDialog()
       }
     }
     return actions
+  }
+
+  async setSelectionBinder(name: string, tooltipEl?: HTMLDivElement) {
+    await this.Shared.bulkApplyBinder(name)
+    this.Shared.clearNoteSelection()
+    if (tooltipEl) this.Shared.closeTooltip(tooltipEl)
+  }
+
+  async addBinderFromMenu(input: HTMLInputElement) {
+    const name = input.value.trim()
+    if (!name) return
+    try {
+      await this.Shared.binder.db.add(name)
+      await this.Shared.bulkApplyBinder(name)
+      input.value = ''
+      this.binderMenuError = ''
+    } catch {
+      this.binderMenuError = 'Could not create binder'
+    }
+  }
+
+  isSelectedBinder(name: string) {
+    const selected = this.Shared.note.all.filter(note => note.id && this.Shared.selectedNoteIds.value.includes(note.id))
+    return !!selected.length && selected.every(note => (note.binder || '') === (name || ''))
   }
 
   // Merge dialog state. Snapshots the visible-grid order of currently
@@ -321,7 +375,13 @@ export class NavbarComponent implements OnInit {
     if (this.isProfileOpen) {
       this.closeProfile()
     }
-    if (this.isFiltersOpen) {
+  }
+
+  @HostListener('document:pointerdown', ['$event'])
+  onDocumentPointerDown(event: PointerEvent) {
+    if (!this.isFiltersOpen) return
+    const target = event.target as Node | null
+    if (!target || !this.filtersContainer?.nativeElement.contains(target)) {
       this.isFiltersOpen = false
     }
   }
@@ -505,6 +565,7 @@ export class NavbarComponent implements OnInit {
   @HostListener('window:scroll')
   onWindowScroll() {
     this.isScrolled = window.scrollY > 0
+    if (this.isFiltersOpen) this.isFiltersOpen = false
   }
 
 }

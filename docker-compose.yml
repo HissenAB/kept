@@ -1,8 +1,6 @@
 services:
   kept:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/ericerkz/kept:latest
     container_name: kept-app
     ports:
       - "6767:6767"
@@ -60,6 +58,10 @@ services:
       # trailing slashes, scheme + host (+ port if non-default):
       # - KEPT_CORS_ORIGINS=https://kept.example.com,https://app.example.com
       #
+      # When KEPT_CORS_ORIGINS is used, Kept still allows exact native app
+      # WebView origins (capacitor://localhost, ionic://localhost, and
+      # localhost variants) so iOS/Android apps can connect.
+      #
       # Localhost dev / LAN / mixed examples:
       # - KEPT_CORS_ORIGINS=http://localhost:4200,http://localhost:6767
       # - KEPT_CORS_ORIGINS=http://192.168.1.50:6767,https://kept.example.com
@@ -77,6 +79,12 @@ services:
       # - VAPID_PUBLIC_KEY=
       # - VAPID_PRIVATE_KEY=
       # - VAPID_SUBJECT=https://kept.example.com
+
+      # Google Takeout import ZIP cap. Default is 5GB and applies only to
+      # Google Keep Takeout imports, not normal note images or attachments.
+      # Large uploads may still be limited by Cloudflare/Nginx/etc.; import
+      # directly over LAN/SSH or raise proxy body-size/timeouts if needed.
+      # - KEPT_TAKEOUT_UPLOAD_MAX=5GB
 
 
     volumes:

@@ -121,12 +121,12 @@
       }
 
       @media (max-width: 700px) {
+        min-width: 40px;
+
         .text {
           display: none;
         }
-      }
 
-      @media (max-width: 500px) {
         .keep-img {
           display: none;
         }
@@ -316,11 +316,11 @@
               // Use viewport units + transform-free chain so iOS Safari
               // correctly escapes the .filters-toggle stacking context.
               position: fixed;
-              top: 64px;
+              top: calc(env(safe-area-inset-top, 0px) + 72px);
               left: 12px;
               right: auto;
               width: calc(100vw - 24px);
-              max-height: calc(100dvh - 84px);
+              max-height: calc(100dvh - env(safe-area-inset-top, 0px) - 92px);
               min-width: 0;
               overflow-y: auto;
               z-index: 3000;
@@ -389,6 +389,33 @@
               letter-spacing: 0.8px;
               padding: 8px 16px 4px;
               text-transform: uppercase;
+            }
+
+            .scope-row {
+              display: grid;
+              gap: 6px;
+              grid-template-columns: 1fr 1fr;
+              padding: 4px 12px 10px;
+
+              button {
+                background: rgba(241, 243, 244, 0.08);
+                border: 1px solid rgba(232, 234, 237, 0.18);
+                border-radius: 999px;
+                color: rgba(232, 234, 237, 0.82);
+                cursor: pointer;
+                font-family: "Google Sans", Roboto, Arial, sans-serif;
+                font-size: 0.78rem;
+                font-weight: 600;
+                height: 30px;
+                line-height: 1;
+                padding: 0 10px;
+
+                &.active {
+                  background: #e8f0fe;
+                  border-color: #8ab4f8;
+                  color: #1a73e8;
+                }
+              }
             }
 
             .empty-state {
@@ -1003,12 +1030,21 @@
         }
       }
     }
+
+    .selection-navbar {
+      background: #2d2e30;
+      border-radius: 8px;
+      box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.3), 0 1px 3px 1px rgba(0, 0, 0, 0.15);
+      min-height: 48px;
+      padding: 4px 8px;
+    }
   }
 }
 
 :host-context(.light-theme) {
   @media (max-width: 599px) {
-    .main-container .navbar {
+    .main-container .navbar,
+    .main-container .selection-navbar {
       background: #fff;
       border: 1px solid #dfe1e5;
       box-shadow: 0 1px 2px 0 rgba(60,64,67,0.3), 0 1px 3px 1px rgba(60,64,67,0.15);
@@ -1095,6 +1131,18 @@
 
               .dropdown-header {
                 color: #5f6368;
+              }
+
+              .scope-row button {
+                background: rgba(60, 64, 67, 0.04);
+                border-color: #dadce0;
+                color: #5f6368;
+
+                &.active {
+                  background: #e8f0fe;
+                  border-color: rgba(26, 115, 232, 0.28);
+                  color: #1a73e8;
+                }
               }
 
               .empty-state {

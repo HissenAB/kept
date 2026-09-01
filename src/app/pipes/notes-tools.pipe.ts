@@ -21,11 +21,13 @@ export class NotesToolsPipe implements PipeTransform {
   // Per-pipe-instance caches. Pipes are pure, so identical inputs return cached output.
   private lastQuery?: string
   private lastParsed?: ParsedSearch
-  private noteHaystackCache = new WeakMap<NoteI, { title: string; body: string; searchText: string; cbCount: number; labelKey: string; attachmentKey: string; haystack: string }>()
+  private noteHaystackCache = new WeakMap<NoteI, { title: string; body: string; searchText: string; cbCount: number; labelKey: string; binder: string; attachmentKey: string; haystack: string }>()
   private static normalizeEl: HTMLDivElement | null = null
 
-  transform(object: NoteI[], type: string, searchQuery = ''): NoteI[] {
+  transform(object: NoteI[], type: string, searchQuery = '', searchScope: 'all' | 'current' = 'all'): NoteI[] {
     let notes: NoteI[]
+    const isSearching = !!searchQuery.trim()
+    const activeNotes = object.filter(x => x.trashed === false && x.archived === false)
     if (type === 'archived') {
       notes = object.filter(x => x.archived === true && x.trashed === false)
     }
@@ -62,7 +64,15 @@ export class NotesToolsPipe implements PipeTransform {
       notes = object.filter(x => this.noteHasAttachment(x) && !x.trashed && !x.archived)
     }
     else if (type === 'home') {
-      notes = object.filter(x => x.trashed === false && x.archived === false)
+      notes = isSearching && searchScope === 'all'
+        ? activeNotes
+        : activeNotes.filter(x => !(x.binder || '').trim())
+    }
+    else if (type.startsWith('binder:')) {
+      const binder = type.slice('binder:'.length)
+      notes = isSearching && searchScope === 'all'
+        ? activeNotes
+        : activeNotes.filter(note => (note.binder || '') === binder)
     }
     else {
       notes = object.filter(note => note.labels.some(label => label.name === type && label.added))
@@ -204,6 +214,7 @@ export class NotesToolsPipe implements PipeTransform {
     const body = note.noteBody || ''
     const searchText = note.searchText || ''
     const cbCount = note.checkBoxes?.length || 0
+    const binder = note.binder || ''
     // Build a cheap key for change-detection of the haystack-relevant fields.
     let labelKey = ''
     if (note.labels) {
@@ -214,15 +225,16 @@ export class NotesToolsPipe implements PipeTransform {
       for (const attachment of note.attachments) attachmentKey += attachment.originalName + '|'
     }
     const cached = this.noteHaystackCache.get(note)
-    if (cached && cached.title === title && cached.body === body && cached.searchText === searchText && cached.cbCount === cbCount && cached.labelKey === labelKey && cached.attachmentKey === attachmentKey) {
+    if (cached && cached.title === title && cached.body === body && cached.searchText === searchText && cached.cbCount === cbCount && cached.labelKey === labelKey && cached.binder === binder && cached.attachmentKey === attachmentKey) {
       return cached.haystack
     }
     let raw = title + ' ' + body + ' ' + searchText
     if (note.checkBoxes) for (const cb of note.checkBoxes) raw += ' ' + (cb.data ?? '')
     if (note.labels) for (const l of note.labels) if (l.added) raw += ' ' + l.name
+    if (binder) raw += ' ' + binder
     if (note.attachments) for (const attachment of note.attachments) raw += ' ' + attachment.originalName
     const haystack = this.normalize(raw)
-    this.noteHaystackCache.set(note, { title, body, searchText, cbCount, labelKey, attachmentKey, haystack })
+    this.noteHaystackCache.set(note, { title, body, searchText, cbCount, labelKey, binder, attachmentKey, haystack })
     return haystack
   }
 

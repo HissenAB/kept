@@ -114,3 +114,15 @@
     background: rgba(0, 0, 0, 0.05);
   }
 }
+
+@media (max-width: 599px) {
+  .update-banner {
+    border: 1px solid rgba(138, 180, 248, 0.35);
+    border-radius: 8px;
+    margin: 80px 12px 8px;
+  }
+
+  .update-banner__content {
+    gap: 8px;
+  }
+}

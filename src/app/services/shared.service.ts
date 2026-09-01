@@ -7,12 +7,15 @@ import { LabelI, LabelModelI } from '../interfaces/labels';
 import { bgColors, bgImages } from '../interfaces/tooltip';
 import { AuthService } from './auth.service';
 import { ReminderService } from './reminder.service';
-import { createPopper } from '@popperjs/core';
+import { createPopper, type Placement } from '@popperjs/core';
+import { environment } from 'src/environments/environment';
 declare var Snackbar: any
 @Injectable({
   providedIn: 'root'
 })
 export class SharedService {
+  private tooltipOutsideListeners = new WeakMap<HTMLDivElement, (event: Event) => void>();
+  private readonly binderStorageKey = 'kept_binders_v1';
 
   // PWA State
   deferredInstallPrompt?: any;
@@ -22,6 +25,7 @@ export class SharedService {
   showInstallButton = new BehaviorSubject<boolean>(false);
 
   private creatingExamples = false;
+  private serverLabels: LabelI[] = [];
 
   constructor(
     private Notes: NotesService,
@@ -36,7 +40,10 @@ export class SharedService {
     // load. Without this, the constructor-time load runs before the
     // session is ready and the page stays blank until manual refresh.
     this.Labels.labelsList$.subscribe({
-      next: (result: LabelI[]) => this.label.list = [...result].reverse(),
+      next: (result: LabelI[]) => {
+        this.serverLabels = result || [];
+        this.refreshLabelList();
+      },
       error: error => console.error(error)
     })
     this.Notes.notesList$.subscribe({
@@ -47,6 +54,8 @@ export class SharedService {
           this.note.pinned = ordered.filter(x => x.pinned === true)
           this.note.unpinned = ordered.filter(x => x.pinned === false)
           this.note.all = ordered
+          this.refreshLabelList();
+          this.refreshBinderList();
         })
       },
       error: error => console.error(error)
@@ -59,27 +68,35 @@ export class SharedService {
         // populated grid on first login — they shouldn't have to refresh
         // or sign out/in to see the starter content.
         const needsDemos = !user.demoNotesCreatedAt
-        if (needsDemos) {
+        if (needsDemos && navigator.onLine) {
           await this.createExampleNotes()
         }
-        this.Notes.load()
-        this.Labels.load()
+        this.Notes.load().catch(console.error)
+        if (navigator.onLine) this.Labels.load().catch(console.error)
       } else {
         // Logout: clear the in-memory mirror so the next user doesn't
         // briefly see the previous account's notes.
         this.note.pinned = []
         this.note.unpinned = []
         this.note.all = []
+        this.serverLabels = []
+        this.label.list = []
+        this.binder.list = []
       }
     })
   }
 
   closeSideBar = new Subject<boolean>()
+  closeSideBarIfOpen = new Subject<boolean>()
+  sideBarCollapsed = new BehaviorSubject<boolean>(false)
   openMobileComposer = new Subject<boolean>()
+  closeMobileComposer = new Subject<boolean>()
+  openSelectedReminder = new Subject<void>()
   saveNote = new Subject<boolean>()
   closeModal = new Subject<boolean>()
   noteViewType = new BehaviorSubject<'list' | 'grid'>('grid')
   selectedNoteIds = new BehaviorSubject<number[]>([])
+  searchScope = new BehaviorSubject<'all' | 'current'>(this.initialSearchScope())
   searchQuery = ''
 
   initPwa() {
@@ -123,6 +140,19 @@ export class SharedService {
     this.Notes.setSearchQuery(query)
   }
 
+  setSearchScope(scope: 'all' | 'current') {
+    this.searchScope.next(scope)
+    try { localStorage.setItem('kept_search_scope', scope); } catch {}
+  }
+
+  private initialSearchScope(): 'all' | 'current' {
+    try {
+      return localStorage.getItem('kept_search_scope') === 'current' ? 'current' : 'all'
+    } catch {
+      return 'all'
+    }
+  }
+
   async refreshData() {
     await Promise.all([
       this.Notes.load(),
@@ -137,6 +167,82 @@ export class SharedService {
 
   clearNoteSelection() {
     this.selectedNoteIds.next([])
+  }
+
+  private refreshLabelList() {
+    const labels: LabelI[] = [];
+    const seen = new Set<string>();
+
+    for (const label of [...this.serverLabels].reverse()) {
+      this.addLabelIfMissing(labels, seen, label);
+    }
+
+    const derivedLabels = (this.note.all || [])
+      .flatMap(note => note.labels || [])
+      .filter(label => label?.added !== false)
+      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
+
+    for (const label of derivedLabels) {
+      this.addLabelIfMissing(labels, seen, label);
+    }
+
+    this.label.list = labels;
+  }
+
+  private addLabelIfMissing(target: LabelI[], seen: Set<string>, label?: LabelI) {
+    const name = String(label?.name || '').trim();
+    if (!name) return;
+    const key = name.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    target.push({ id: label?.id, name });
+  }
+
+  private binderStoragePartition() {
+    const server = environment.apiUrl || location.origin;
+    const userId = this.auth.currentUser?.id || 'anon';
+    return `${this.binderStorageKey}:${server}:${userId}`;
+  }
+
+  private storedBinders(): string[] {
+    try {
+      const raw = localStorage.getItem(this.binderStoragePartition());
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.map(item => String(item || '').trim()).filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private saveStoredBinders(names: string[]) {
+    const unique: string[] = [];
+    const seen = new Set<string>();
+    for (const name of names.map(item => String(item || '').trim()).filter(Boolean)) {
+      const key = name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(name);
+    }
+    try { localStorage.setItem(this.binderStoragePartition(), JSON.stringify(unique)); } catch {}
+  }
+
+  refreshBinderList() {
+    const names = [
+      ...this.storedBinders(),
+      ...(this.note.all || []).map(note => note.binder || '').filter(Boolean)
+    ];
+    const unique: { name: string }[] = [];
+    const seen = new Set<string>();
+    for (const name of names) {
+      const clean = String(name || '').trim();
+      if (!clean) continue;
+      const key = clean.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push({ name: clean });
+    }
+    unique.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+    this.binder.list = unique;
   }
 
   isNoteSelected(noteId?: number) {
@@ -188,6 +294,15 @@ export class SharedService {
         labels = labels.filter(noteLabel => noteLabel.id !== label.id)
       }
       await this.Notes.updateKey({ labels }, note.id!)
+    }
+  }
+
+  async bulkApplyBinder(name: string) {
+    const binder = String(name || '').trim();
+    if (binder) await this.binder.db.add(binder);
+    const selected = this.note.all.filter(note => note.id && this.selectedNoteIds.value.includes(note.id));
+    for (const note of selected) {
+      await this.Notes.updateKey({ binder }, note.id!);
     }
   }
 
@@ -393,6 +508,41 @@ export class SharedService {
     }
   }
 
+  binder = {
+    list: [] as { name: string }[],
+    db: {
+      add: async (name: string) => {
+        const clean = String(name || '').trim();
+        if (!clean) return;
+        const names = this.storedBinders();
+        if (!names.some(item => item.toLowerCase() === clean.toLowerCase())) {
+          this.saveStoredBinders([...names, clean]);
+        }
+        this.refreshBinderList();
+      },
+      update: async (oldName: string, newName: string) => {
+        const oldClean = String(oldName || '').trim();
+        const newClean = String(newName || '').trim();
+        if (!oldClean || !newClean) return;
+        const names = this.storedBinders().map(item => item.toLowerCase() === oldClean.toLowerCase() ? newClean : item);
+        this.saveStoredBinders(names);
+        for (const note of this.note.all.filter(note => (note.binder || '').toLowerCase() === oldClean.toLowerCase())) {
+          if (note.id) await this.Notes.updateKey({ binder: newClean }, note.id);
+        }
+        this.refreshBinderList();
+      },
+      delete: async (name: string) => {
+        const clean = String(name || '').trim();
+        if (!clean) return;
+        this.saveStoredBinders(this.storedBinders().filter(item => item.toLowerCase() !== clean.toLowerCase()));
+        for (const note of this.note.all.filter(note => (note.binder || '').toLowerCase() === clean.toLowerCase())) {
+          if (note.id) await this.Notes.updateKey({ binder: '' }, note.id);
+        }
+        this.refreshBinderList();
+      }
+    }
+  }
+
   // ? snakebar (aka toast) --------------------------------------
 
   snackBar(text: { action: string, opposite: string }, obj: UpdateKeyI, noteId: number) {
@@ -421,27 +571,38 @@ export class SharedService {
 
   // ? Tooltip --------------------------------------
 
-  createTooltip(button: HTMLElement, tooltipEl: HTMLDivElement) {
+  createTooltip(button: HTMLElement, tooltipEl: HTMLDivElement, placement: Placement = 'bottom') {
+    this.removeTooltipOutsideListener(tooltipEl)
     tooltipEl.dataset['isTooltipOpen'] = 'true'
-    createPopper(button, tooltipEl)
+    createPopper(button, tooltipEl, { placement })
     // Defer the outside-click listener by one frame and use `click` instead
     // of `mousedown`. On iOS the first tap on a menu item arrives via the
     // synthetic mousedown → click sequence; if we listen on mousedown we
     // race the menu item's click handler and can close the tooltip before
     // it fires, which the user perceives as needing to tap twice.
     const fct = (event: Event) => {
-      if (!tooltipEl.contains(event.target as Node)) {
-        document.removeEventListener('click', fct, true)
-        tooltipEl.dataset['isTooltipOpen'] = 'false'
+      const target = event.target as Node
+      if (!tooltipEl.contains(target) && !button.contains(target)) {
+        this.closeTooltip(tooltipEl)
       }
     }
+    this.tooltipOutsideListeners.set(tooltipEl, fct)
     requestAnimationFrame(() => {
+      if (tooltipEl.dataset['isTooltipOpen'] !== 'true') return
       document.addEventListener('click', fct, true)
     })
   }
 
   closeTooltip(tooltipEl: HTMLDivElement) {
     tooltipEl.dataset['isTooltipOpen'] = 'false'
+    this.removeTooltipOutsideListener(tooltipEl)
+  }
+
+  private removeTooltipOutsideListener(tooltipEl: HTMLDivElement) {
+    const listener = this.tooltipOutsideListeners.get(tooltipEl)
+    if (!listener) return
+    document.removeEventListener('click', listener, true)
+    this.tooltipOutsideListeners.delete(tooltipEl)
   }
 
 }

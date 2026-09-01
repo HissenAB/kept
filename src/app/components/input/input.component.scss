@@ -265,7 +265,7 @@
   display: none;
 }
 
-@media (max-width: 599px) {
+@media (max-width: 599px), (max-height: 500px) and (orientation: landscape) {
   .mobile-top-bar {
     display: flex;
     align-items: center;
@@ -277,13 +277,17 @@
     background: inherit;
 
     .mobile-icon {
+      background: transparent;
+      border: 0;
+      padding: 0;
       width: 48px;
       height: 48px;
       display: flex;
       align-items: center;
       justify-content: center;
-      color: #9aa0a6;
+      color: inherit;
       cursor: pointer;
+      opacity: 0.58;
       // Anchor for any absolutely-positioned overlay (e.g. the transparent
       // <input type="date"> sitting on the alarm icon).
       position: relative;
@@ -294,13 +298,19 @@
       }
 
       &.back {
-        background: transparent;
-        border: none;
         margin-right: 8px;
       }
 
+      &:active {
+        background: color-mix(in srgb, currentColor 12%, transparent);
+        border-radius: 50%;
+        opacity: 1;
+      }
+
       &.pin.pinned {
-        color: #fff;
+        color: inherit;
+        opacity: 0.9;
+
         .material-symbols-outlined {
           font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
         }
@@ -382,13 +392,9 @@
   }
 
   :host-context(.light-theme) {
-    .mobile-top-bar .mobile-icon,
     .mobile-bottom-bar .mobile-icon,
     .mobile-bottom-bar .timestamp {
       color: #5f6368;
-    }
-    .mobile-top-bar .mobile-icon.pin.pinned {
-      color: #202124;
     }
     .mobile-bottom-bar {
       border-top-color: #e0e0e0;
@@ -528,7 +534,7 @@
   // On phones the toolbar would overflow off the right; let it wrap to a
   // second row so all icons stay reachable AND popovers (color pickers, more
   // menu) can drop down without being clipped by overflow.
-  @media (max-width: 599px) {
+  @media (max-width: 599px), (max-height: 500px) and (orientation: landscape) {
     flex-wrap: wrap;
     gap: 2px;
     padding: 4px;
@@ -894,7 +900,7 @@
   }
 }
 
-@media (max-width:660px) {
+@media (max-width:660px), (max-height: 500px) and (orientation: landscape) {
   .mobile-compose-mode {
     display: block;
   }
@@ -1001,6 +1007,53 @@
       display: flex !important;
     }
 
+  }
+}
+
+@media (orientation: landscape) {
+  :host(.native-phone-layout) .mobile-compose-mode {
+    --phone-safe-left: max(6px, env(safe-area-inset-left, 0px));
+    --phone-safe-right: max(6px, env(safe-area-inset-right, 0px));
+
+    .note-container {
+      box-sizing: border-box;
+      padding-left: var(--phone-safe-left);
+      padding-right: var(--phone-safe-right);
+    }
+
+    .mobile-top-bar {
+      box-sizing: border-box;
+      margin-left: calc(-1 * var(--phone-safe-left));
+      margin-right: calc(-1 * var(--phone-safe-right));
+      padding-left: calc(var(--phone-safe-left) + 4px);
+      padding-right: calc(var(--phone-safe-right) + 4px);
+    }
+
+    .mobile-bottom-bar {
+      box-sizing: border-box;
+      padding-left: calc(var(--phone-safe-left) + 4px);
+      padding-right: calc(var(--phone-safe-right) + 4px);
+      width: 100%;
+    }
+
+    .attachments-list {
+      padding-left: calc(var(--phone-safe-left) + 12px);
+      padding-right: calc(var(--phone-safe-right) + 12px);
+    }
+
+    .reminder-chip {
+      margin-left: calc(var(--phone-safe-left) + 12px);
+      margin-right: calc(var(--phone-safe-right) + 12px);
+    }
+  }
+}
+
+@media (max-width: 599px) and (orientation: portrait) {
+  .moreMenu[data-is-tooltip-open="true"] {
+    bottom: auto !important;
+    right: auto !important;
+    height: auto !important;
+    min-height: 0 !important;
   }
 }
 
@@ -1120,7 +1173,7 @@
   }
 }
 
-@media (max-width: 599px) {
+@media (max-width: 599px), (max-height: 500px) and (orientation: landscape) {
   .active-editors-presence {
     top: 14px;
     right: 160px; // Shift left to avoid mobile header icons (3 * 48px icons + margins)

@@ -154,6 +154,14 @@
         </button>
         <span class="spacer"></span>
         <div class="mobile-top-icons">
+          <button type="button" class="mobile-icon history" aria-label="Undo"
+            (pointerdown)="runTextHistory('undo',$event)">
+            <span class="material-symbols-outlined">undo</span>
+          </button>
+          <button type="button" class="mobile-icon history" aria-label="Redo"
+            (pointerdown)="runTextHistory('redo',$event)">
+            <span class="material-symbols-outlined">redo</span>
+          </button>
           <div [class.pinned]="notePin.dataset['pinned'] === 'true'" class="mobile-icon pin" (click)="togglePinned()">
             <span class="material-symbols-outlined">{{notePin.dataset['pinned'] === 'true' ? 'push_pin' : 'push_pin'}}</span>
           </div>
@@ -177,7 +185,7 @@
       <ng-container [ngTemplateOutlet]="imagesTemplate" [ngTemplateOutletContext]="{ placement: 'top' }">
       </ng-container>
       <div [hidden]="noteTitle.innerHTML.length" class="note-title ph"> Title</div>
-      <div #noteTitle (input)="onNoteTitleInput()" (paste)="pasteEvent($event)"
+      <div #noteTitle (input)="onNoteTitleInput()" (paste)="pasteEvent($event)" (focus)="rememberTextHistoryTarget(noteTitle)"
         class="note-title" contenteditable="true" spellcheck="true" autocomplete="off" autocorrect="off" autocapitalize="sentences" inputmode="text">
       </div>
       <!--? note OR checkboxes (or both, in the case of merged hybrid notes) -->
@@ -205,7 +213,11 @@
     @if (getActiveReminder(); as r) {
       <div class="reminder-chip" (mousedown)="$event.stopPropagation()" (click)="alarmIconTapped($event)">
         <img src="./assets/images/svg/clock.svg" alt="" width="12" height="12">
-        {{formatReminderDate(r.dueAtUtc)}}
+        @if (r.dueAtUtc) {
+          {{formatReminderDate(r.dueAtUtc)}}
+        } @else if (r.locationName) {
+          📍 {{ r.locationName }}
+        }
       </div>
     }
   </div>
@@ -218,7 +230,7 @@
   <!--? icons -->
   @if (!isTrashed && !isDrawingNote) {
     <div class="icons-container">
-      @if (showTextFormatting && !isCbox.value) {
+      @if (showTextFormatting && canFormatText()) {
         <div class="text-format-toolbar" (mousedown)="$event.preventDefault()" (click)="$event.stopPropagation()">
           <button type="button" (mousedown)="applyTextFormat('h1',$event)">H1</button>
           <button type="button" (mousedown)="applyTextFormat('h2',$event)">H2</button>
@@ -232,7 +244,7 @@
       }
       <div class="icons">
         <button type="button" class="text-format-trigger H pop" data-pop="Formatting options"
-          [class.active]="showTextFormatting" [disabled]="isCbox.value" (click)="toggleTextFormatting($event)">A</button>
+          [class.active]="showTextFormatting" [disabled]="!canFormatText()" (click)="toggleTextFormatting($event)">A</button>
         <div class="alarm H pop" data-pop="Remind me"
           [class.alarm-active]="!!getActiveReminder()"
           (click)="alarmIconTapped($event)">
@@ -249,8 +261,10 @@
           [attr.data-pop]="isArchived ? 'Unarchive' : 'Archive'"></div>
         <div #moreMenuTtBtn class="more H pop" data-pop="More" (click)="openTooltip(moreMenuTtBtn,moreMenuTt)">
         </div>
-        <div class="undo disabled pop" data-pop="Undo"></div>
-        <div class="undo r disabled"></div>
+        <button type="button" class="undo pop" data-pop="Undo" aria-label="Undo"
+          (mousedown)="runTextHistory('undo',$event)"></button>
+        <button type="button" class="undo r pop" data-pop="Redo" aria-label="Redo"
+          (mousedown)="runTextHistory('redo',$event)"></button>
       </div>
       @if (pendingDateConfirm) {
         <div class="date-confirm-pill date-confirm-pill--desktop" role="region" aria-label="Confirm reminder date">
@@ -308,10 +322,42 @@
       <button type="button" class="rp-clear" (click)="clearReminder($event)">Remove reminder</button>
     </div>
   }
+  @if (showReminderTypeDialog && !getActiveReminder()) {
+    <div class="reminder-date-dialog reminder-choice-dialog" (mousedown)="$event.stopPropagation()" (click)="$event.stopPropagation()"
+      role="dialog" aria-label="Set reminder">
+      <h2 class="rd-choice-title">Set reminder</h2>
+      <p class="rd-choice-subtitle">How should we remind you?</p>
+      <button type="button" class="rd-choice-card" (click)="chooseReminderDateTime()">
+        <span class="rd-choice-icon">
+          <span class="material-symbols-outlined">schedule</span>
+        </span>
+        <span class="rd-choice-copy">
+          <strong>Date &amp; time</strong>
+          <span>At a specific moment</span>
+        </span>
+        <span class="material-symbols-outlined rd-choice-chevron">chevron_right</span>
+      </button>
+      @if (keptPlugins.supportsNativeLocationReminders) {
+        <button type="button" class="rd-choice-card" (click)="chooseReminderPlace()">
+          <span class="rd-choice-icon">
+            <span class="material-symbols-outlined">location_on</span>
+          </span>
+          <span class="rd-choice-copy">
+            <strong>Place</strong>
+            <span>When I arrive or leave somewhere</span>
+          </span>
+          <span class="material-symbols-outlined rd-choice-chevron">chevron_right</span>
+        </button>
+      }
+      <button type="button" class="rd-choice-cancel" (click)="cancelReminderType()">Cancel</button>
+    </div>
+  }
   @if (showReminderDateDialog && !getActiveReminder()) {
     <div class="reminder-date-dialog" (mousedown)="$event.stopPropagation()" (click)="$event.stopPropagation()"
       role="dialog" aria-label="Set reminder date">
-      <div class="rd-title">Set reminder</div>
+      <div class="rd-title">
+        Set reminder
+      </div>
       <div class="rd-calendar" aria-label="Reminder date calendar">
         <div class="rd-calendar-head">
           <button type="button" class="rd-nav" aria-label="Previous month" (click)="shiftCalendarMonth(-1)">
@@ -340,6 +386,34 @@
           }
         </div>
       </div>
+      <div class="rd-repeat" aria-label="Repeat reminder">
+        <div class="rd-repeat-title">Repeat</div>
+        <div class="rd-repeat-options">
+          @for (option of reminderRepeatOptions; track option.value) {
+            <button type="button"
+              [class.active]="reminderRepeatType === option.value"
+              (click)="setReminderRepeatType(option.value)">
+              {{ option.label }}
+            </button>
+          }
+        </div>
+        @if (reminderRepeatType === 'custom_days') {
+          <label class="rd-repeat-custom">
+            <span>Every</span>
+            <input type="number" min="1" max="365" inputmode="numeric" [(ngModel)]="reminderRepeatCustomDays">
+            <span>days</span>
+          </label>
+        }
+        <label class="rd-repeat-float">
+          <span class="material-symbols-outlined rd-float-icon">vertical_align_top</span>
+          <span class="rd-float-copy">
+            <strong>Float to top when it fires</strong>
+            <span>Jumps this note above the rest</span>
+          </span>
+          <input type="checkbox" [(ngModel)]="reminderMoveToTopOnTrigger">
+          <span class="rd-switch" aria-hidden="true"></span>
+        </label>
+      </div>
       <div class="rd-actions">
         <button type="button" class="rd-secondary" (click)="cancelReminderDate()">Cancel</button>
         <button type="button" class="rd-primary" [disabled]="!customDate" (click)="confirmReminderDate(customTimeInp)">Pick time</button>
@@ -348,6 +422,232 @@
   }
   <input #customTimeInp type="text" class="timepicker-ui-input rp-hidden-time" autocomplete="off" readonly [(ngModel)]="customTime"
     aria-hidden="true" tabindex="-1">
+  @if (showReminderLocationDialog && !getActiveReminder() && keptPlugins.supportsNativeLocationReminders) {
+    <div class="reminder-date-dialog reminder-place-dialog" (mousedown)="$event.stopPropagation()" (click)="$event.stopPropagation()"
+      role="dialog" aria-label="Set location reminder">
+      <div class="rd-place-header">
+        <button type="button" class="rd-place-back" aria-label="Back"
+          (click)="backFromPlaceDialog()">
+          <span class="material-symbols-outlined">chevron_left</span>
+        </button>
+        <h2>{{ placeDialogView === 'manage' ? 'Saved places' : (placeDialogView === 'add' ? 'Add saved place' : 'Place') }}</h2>
+      </div>
+
+      @if (placeDialogView === 'choose') {
+        <form class="rd-place-search" (ngSubmit)="openSearchPlace(true); resolveLocation('search')">
+          <span class="material-symbols-outlined">search</span>
+          <input type="text" placeholder="Search for a place"
+            name="locationPhrase" [(ngModel)]="locationPhrase" enterkeyhint="search" />
+        </form>
+        <div class="rd-place-section-title">
+          <span>Saved Places</span>
+          <button type="button" (click)="openManagePlaces()">Manage</button>
+        </div>
+        <div class="rd-place-list">
+          @if (savedPlacesLoading) {
+            <p class="rd-location-message">Loading saved places...</p>
+          }
+          @for (place of visiblePlaceItems(); track place.id) {
+            <button type="button" class="rd-place-row" (click)="choosePlaceItem(place)">
+              <span class="rd-place-icon material-symbols-outlined">{{ placeIcon(place.placeType) }}</span>
+              <span class="rd-place-copy">
+                <strong>{{ place.name }}</strong>
+                <small>{{ place.address }}</small>
+              </span>
+              @if (!('prompt' in place)) {
+                <span class="rd-place-distance">
+                  @if (place.locationTrigger === 'arrive') {
+                    <span class="material-symbols-outlined">near_me</span>
+                  }
+                  {{ placeDistanceLabel(place) }}
+                </span>
+              }
+            </button>
+          }
+          <button type="button" class="rd-place-row add-row" (click)="openAddSavedPlace()">
+            <span class="rd-place-icon material-symbols-outlined">add</span>
+            <span class="rd-place-copy"><strong>Add saved place</strong></span>
+          </button>
+        </div>
+        @if (savedPlacesError) {
+          <p class="rd-location-message">{{ savedPlacesError }}</p>
+        }
+        <div class="rd-place-actions">
+          <button type="button" class="rd-place-cancel" (click)="clearLocation()">Cancel</button>
+          <button type="button" class="rd-place-save" (click)="openSearchPlace(true); resolveLocation('search')" [disabled]="resolving || !locationPhrase.trim()">
+            {{ resolving ? 'Searching...' : 'Find place' }}
+          </button>
+        </div>
+      }
+
+      @if (placeDialogView === 'manage') {
+        <form class="rd-place-search" (ngSubmit)="$event.preventDefault()">
+          <span class="material-symbols-outlined">search</span>
+          <input type="text" placeholder="Search for a place"
+            name="savedPlacesSearch" [(ngModel)]="savedPlacesSearch" enterkeyhint="search" />
+        </form>
+        <div class="rd-place-manage-list">
+          @for (place of visibleSavedPlaces(); track place.id) {
+            <div class="rd-place-swipe" [class.deleting]="swipingPlaceId === place.id">
+              <button type="button" class="rd-place-delete-bg" (click)="deleteSavedPlace(place)">Delete</button>
+              <button type="button" class="rd-place-row manage-row"
+                (pointerdown)="placeSwipeStart($event, place)"
+                (pointermove)="placeSwipeMove($event, place)"
+                (pointerup)="placeSwipeEnd(place)"
+                (pointercancel)="swipingPlaceId = null">
+                <span class="rd-place-icon material-symbols-outlined">{{ placeIcon(place.placeType) }}</span>
+                <span class="rd-place-copy">
+                  <strong>{{ place.name }}</strong>
+                  <small>{{ place.address }}</small>
+                </span>
+                <span class="rd-trigger-pill">{{ place.locationTrigger === 'leave' ? 'Leave' : 'Arrive' }}</span>
+                <span class="rd-place-distance">{{ placeDistanceLabel(place) }}</span>
+                <span class="rd-place-chevron material-symbols-outlined">chevron_right</span>
+              </button>
+            </div>
+          }
+        </div>
+        <button type="button" class="rd-place-row add-row rd-manage-add" (click)="openAddSavedPlace()">
+          <span class="rd-place-icon material-symbols-outlined">add</span>
+          <span class="rd-place-copy"><strong>Add saved place</strong></span>
+        </button>
+      }
+
+      @if (placeDialogView === 'add' || placeDialogView === 'search') {
+        <form class="rd-place-search" (ngSubmit)="resolveLocation(placeDialogView)">
+          <span class="material-symbols-outlined">search</span>
+          <input type="text" placeholder="Search for a place"
+            name="locationPhrase" [(ngModel)]="locationPhrase" enterkeyhint="search" />
+        </form>
+        @switch (locationState) {
+          @case ('idle') {
+            <div class="rd-place-map" aria-label="Map preview placeholder">
+              <span class="material-symbols-outlined">location_on</span>
+              <span>map preview</span>
+            </div>
+          }
+          @case ('resolved') {
+            <div class="rd-place-map" [class.has-map]="locationMapPreview" aria-label="Map preview">
+              @if (locationMapPreview) {
+                <img [src]="locationMapPreview" alt="" />
+              } @else {
+                <span class="material-symbols-outlined">location_on</span>
+                <span>map preview</span>
+              }
+            </div>
+          }
+          @case ('ambiguous') {
+            <div class="rd-place-map" aria-hidden="true">
+              <span class="material-symbols-outlined">location_on</span>
+              <span>map preview</span>
+            </div>
+            <p class="rd-location-message">Multiple places found. Pick one:</p>
+            <div class="rd-location-candidates">
+              @for (c of candidates; track c.displayName) {
+                <button type="button" class="rd-location-candidate" (click)="selectCandidate(c)">
+                  {{ c.displayName }}
+                </button>
+              }
+            </div>
+          }
+          @case ('permission') {
+            <div class="rd-place-map" aria-hidden="true">
+              <span class="material-symbols-outlined">location_on</span>
+              <span>map preview</span>
+            </div>
+            <p class="rd-location-message">{{ permissionReason }}</p>
+          }
+          @case ('notFound') {
+            <div class="rd-place-map" aria-hidden="true">
+              <span class="material-symbols-outlined">location_on</span>
+              <span>map preview</span>
+            </div>
+            <p class="rd-location-message">Place not found. Try a different search.</p>
+          }
+        }
+
+        @if (placeDialogView === 'add') {
+          <label class="rd-place-field">
+            <span>Name</span>
+            <div>
+              <span class="material-symbols-outlined">location_on</span>
+              <input type="text" placeholder="e.g. Home, Gym, Costco" name="addPlaceName" [(ngModel)]="addPlaceName" />
+            </div>
+          </label>
+          <div class="rd-place-chips">
+            @for (type of savedPlaceTypes; track type) {
+              <button type="button" [class.active]="addPlaceType === type" (click)="setAddPlaceType(type)">
+                <span class="material-symbols-outlined">{{ placeIcon(type) }}</span>
+                {{ type === 'other' ? 'Other' : (type | titlecase) }}
+              </button>
+            }
+          </div>
+          <div class="rd-place-field-title">Default trigger</div>
+          <div class="rd-segmented">
+            <button type="button" [class.active]="locationTrigger === 'arrive'" (click)="locationTrigger = 'arrive'">When I arrive</button>
+            <button type="button" [class.active]="locationTrigger === 'leave'" (click)="locationTrigger = 'leave'">When I leave</button>
+          </div>
+          <div class="rd-place-field-title">Trigger radius</div>
+          <div class="rd-radius-options">
+            @for (radius of savedPlaceRadii; track radius) {
+              <button type="button" [class.active]="addPlaceRadiusMeters === radius" (click)="addPlaceRadiusMeters = radius">
+                {{ radius >= 1000 ? '1 km' : (radius + ' m') }}
+              </button>
+            }
+          </div>
+        }
+
+        @if (placeDialogView === 'search') {
+          <button type="button" class="rd-arrive-choice" [class.active]="resolvedLocation" (click)="toggleLocationTrigger()">
+            <span class="material-symbols-outlined">location_on</span>
+            Remind me when I {{ locationTrigger === 'leave' ? 'leave' : 'arrive' }}
+            <span class="rd-switch"><span class="material-symbols-outlined">swap_vert</span>Switch</span>
+          </button>
+        }
+
+        <div class="rd-place-actions">
+          <button type="button" class="rd-place-cancel" (click)="placeDialogView === 'search' ? openPlaceChooser() : clearLocation()">Cancel</button>
+          @if (placeDialogView === 'add') {
+            <button type="button" class="rd-place-save" (click)="saveSavedPlace()" [disabled]="addPlaceSaving || !resolvedLocation || !addPlaceName.trim()">
+              {{ addPlaceSaving ? 'Saving...' : 'Save place' }}
+            </button>
+          } @else if (resolvedLocation) {
+            <button type="button" class="rd-place-save" (click)="confirmLocationReminder()">Find place</button>
+          } @else {
+            <button type="button" class="rd-place-save" (click)="resolveLocation('search')" [disabled]="resolving || !locationPhrase.trim()">
+              {{ resolving ? 'Searching...' : 'Find place' }}
+            </button>
+          }
+        </div>
+      }
+    </div>
+  }
+  @if (showAndroidBackgroundLocationEducation) {
+    <div class="reminder-date-dialog android-location-education"
+      (mousedown)="$event.stopPropagation()" (click)="$event.stopPropagation()"
+      role="dialog" aria-label="Allow location reminders">
+      <div class="android-location-education__icon">
+        <span class="material-symbols-outlined">location_on</span>
+      </div>
+      <h2>Allow background location reminders</h2>
+      @if (androidLocationEducationMode === 'foreground') {
+        <p>Kept collects, transmits, and stores location data, including saved places and reminder coordinates, to enable location-based reminders in the background when the app is closed or not in use.</p>
+        <p>This data is used only for reminder features and is stored on your Kept server.</p>
+      } @else {
+        <p>Kept needs background location access to enable location reminders when the app is closed or not in use.</p>
+        <p>On the next Android screen, choose <strong>Permissions</strong> &gt; <strong>Location</strong> &gt; <strong>Allow all the time</strong>.</p>
+      }
+      @if (androidBackgroundLocationMessage) {
+        <div class="android-location-education__message">{{ androidBackgroundLocationMessage }}</div>
+      }
+      <div class="android-location-education__actions">
+        <button type="button" class="secondary" (click)="cancelAndroidBackgroundLocationEducation()">Not now</button>
+        <button type="button" class="primary" (click)="continueAndroidLocationDisclosure()">
+          {{ androidLocationEducationMode === 'foreground' ? 'Allow location reminders' : 'Open settings' }}
+        </button>
+      </div>
+    </div>
+  }
 </div>
 </div>
 
@@ -433,7 +733,7 @@
 <!--* note template -->
 <ng-template #noteTemplate>
   <div [hidden]="noteBody.innerHTML.length" class="note-body ph">Take a note…</div>
-  <div #noteBody (input)="onNoteBodyInput(noteBody)" (paste)="pasteEvent($event)"
+  <div #noteBody (input)="onNoteBodyInput(noteBody)" (paste)="pasteEvent($event)" (focus)="rememberTextHistoryTarget(noteBody)"
     (click)="onNoteBodyClick($event)"
     class="note-body" contenteditable="true" spellcheck="true" autocomplete="off" autocorrect="off" autocapitalize="sentences" inputmode="text">
   </div>
@@ -447,21 +747,21 @@
     <div class="cbox-plus-icon"></div>
     <div class="cbox-note-container">
       <div class="cbox-note ph">List item</div>
-      <div #cboxPh (keydown)="cboxPhKeyDown($event)" class="cbox-note" contenteditable="true" spellcheck="true" autocomplete="off" autocorrect="off" autocapitalize="sentences" inputmode="text">
+      <div #cboxPh (keydown)="cboxPhKeyDown($event)" (focus)="rememberTextHistoryTarget(cboxPh)" class="cbox-note" contenteditable="true" spellcheck="true" autocomplete="off" autocorrect="off" autocapitalize="sentences" inputmode="text">
       </div>
     </div>
   </div>
   <!--? isDone: true -->
-  @if ((checkBoxes | cboxDone:true).length) {
+  @if (preferences.value.moveCompletedChecklistItemsToBottom && completedChecklistCount()) {
     <div class="hr"></div>
     <div class="cbox-done-container" (click)="isCboxCompletedListCollapsed = !isCboxCompletedListCollapsed">
       <div [class.rotate]="!isCboxCompletedListCollapsed" class="cbox-arrow"></div>
       <div>
-        <span>({{(checkBoxes | cboxDone:true).length}}) Completed item</span>
+        <span>({{completedChecklistCount()}}) Completed items</span>
       </div>
     </div>
   }
-  @if (!isCboxCompletedListCollapsed) {
+  @if (preferences.value.moveCompletedChecklistItemsToBottom && !isCboxCompletedListCollapsed) {
     <ng-container [ngTemplateOutlet]="cboxTemplate"
       [ngTemplateOutletContext]="{ isDone: true }">
     </ng-container>
@@ -469,7 +769,7 @@
 
   <!--* cbox template -->
   <ng-template let-isDone="isDone" #cboxTemplate>
-    @for (cb of checkBoxes | cboxDone:isDone; track cb.id; let last = $last) {
+    @for (cb of checklistRowsForSection(isDone); track cb.id; let last = $last) {
       <div class="cbox-container" [attr.data-cbox-row-id]="cb.id" [class.cbox-dragging]="draggedCboxId === cb.id"
         [draggable]="dragReadyCboxId === cb.id"
         (dragstart)="cboxDragStart(cb.id, $event)" (dragend)="cboxDragEnd()"
@@ -482,12 +782,15 @@
           (touchend)="cboxTouchEnd()"
           (touchcancel)="cboxTouchEnd()"></div>
         <div [class.done]="cb.done" class="cbox-icon"
+          [style.margin-left.px]="checkboxIndentPx(cb)"
           (touchend)="toggleCboxDone(cb.id, $event)"
           (click)="toggleCboxDone(cb.id, $event)"></div>
         <div class="cbox-note-container">
           <div #cboxInput [attr.data-cbox-last]="last" [attr.data-cbox-id]="cb.id" [class.cbox-done]="cb.done"
-            (blur)="cboxTools(cb.id).update(cboxInput)" (keydown)="cBoxKeyDown($event,cb.id)"
-            (focus)="cboxInputFocus($event)"
+            (input)="onCboxInput(cb.id)" (blur)="cboxTools(cb.id).update(cboxInput)" (keydown)="cBoxKeyDown($event,cb.id)"
+            (touchstart)="cboxTextTouchStart($event, cb.id, cboxInput)" (touchmove)="cboxTextTouchMove($event, cb.id, cboxInput)"
+            (touchcancel)="cboxTextTouchCancel(cb.id, cboxInput)"
+            (focus)="cboxInputFocus($event)" (touchend)="focusCboxFromTouch($event, cb.id, cboxInput)"
             class="cbox-note" contenteditable="true" spellcheck="true" autocomplete="off" autocorrect="off" autocapitalize="sentences" inputmode="text" [innerHTML]="cb.data">
           </div>
         </div>
@@ -508,6 +811,10 @@
     (click)="this.Shared.closeTooltip(moreMenuTt);openTooltip(moreMenuTtBtn!.nativeElement,labelMenuTt)">
     Add label
   </div>
+  <div
+    (click)="this.Shared.closeTooltip(moreMenuTt);this.Shared.closeTooltip(labelMenuTt);openTooltip(moreMenuTtBtn!.nativeElement,binderMenuTt)">
+    Move to binder
+  </div>
   <!-- <div [hidden]="moreMenuEls.drawing.disabled">{{moreMenuEls.drawing.value}}</div> -->
   <div [hidden]="moreMenuEls.copy.disabled" (click)="moreMenu(moreMenuTt).clone()">
     Make a copy
@@ -515,7 +822,45 @@
   <div (click)="moreMenu(moreMenuTt).toggleCbox()">
     {{moreMenuEls.checkbox.value}}
   </div>
+  @if (isEditing && !isSharedNoteForCurrentUser() && !noteToEdit.locked) {
+    <div (click)="lockCurrentNote(moreMenuTt)">Lock note</div>
+  }
+  @if (isEditing && !isSharedNoteForCurrentUser() && noteToEdit.locked) {
+    <div (click)="relockCurrentNote(moreMenuTt)">Relock note</div>
+    <div (click)="changeCurrentNoteLock(moreMenuTt)">Change passcode</div>
+    <div (click)="removeCurrentNoteLock(moreMenuTt)">Remove lock</div>
+  }
   <!-- <div [hidden]="moreMenuEls.gdocs.disabled">{{moreMenuEls.gdocs.value}}</div> -->
+</div>
+<!--? binder MENU -->
+<div #binderMenuTt data-tooltip="true" data-is-tooltip-open="false" class="labelMenu binderMenu">
+  <div class="title">Move to binder</div>
+  <div class="search">
+    <input #newBinderInput type="text" maxlength="50" placeholder="Enter binder name"
+      (keydown.enter)="addBinderFromMenu(newBinderInput); $event.preventDefault()" (blur)="addBinderFromMenu(newBinderInput)"
+      (input)="binderMenuError=''">
+  </div>
+  @if (newBinderInput.value.trim().length) {
+    <div class="label-list create-label" (mousedown)="$event.preventDefault()" (click)="addBinderFromMenu(newBinderInput)">
+      <div class="check-icon"></div>
+      <div class="label-name">Create "{{newBinderInput.value.trim()}}"</div>
+    </div>
+  }
+  @if (binderMenuError) {
+    <div class="label-error">{{binderMenuError}}</div>
+  }
+  <div class="label-list-container">
+    <div class="label-list" (click)="selectBinder('', binderMenuTt)">
+      <div [class.done]="!binderName" class="check-icon"></div>
+      <div class="label-name">No binder</div>
+    </div>
+    @for (binder of Shared.binder.list; track binder.name) {
+      <div class="label-list" (click)="selectBinder(binder.name, binderMenuTt)">
+        <div [class.done]='isSelectedBinder(binder.name)' class="check-icon"></div>
+        <div class="label-name">{{binder.name}}</div>
+      </div>
+    }
+  </div>
 </div>
 <!--? color MENU -->
 <div #colorMenuTt data-tooltip="true" data-is-tooltip-open="false" class="colorMenu">
@@ -559,7 +904,7 @@
           </span>
         } @else {
           <input type="checkbox" [checked]="isCollaboratorSelected(user.id)"
-            [disabled]="!canManageCollaborators()" (change)="toggleCollaborator(user.id)">
+            [disabled]="!canManageCollaborators() || isSavingCollaborators" (change)="toggleCollaborator(user.id)">
         }
         <div class="collaborator-avatar-wrapper">
           @if (user.avatarDataUrl) {
@@ -586,10 +931,10 @@
 <div #labelMenuTt data-tooltip="true" data-is-tooltip-open="false" class="labelMenu">
   <div class="title">Label note</div>
   <div class="search">
+    <div class="search-icon"></div>
     <input #newLabelInput type="text" maxlength="50" placeholder="Enter label name"
       (keydown.enter)="addLabelFromMenu(newLabelInput); $event.preventDefault()" (blur)="addLabelFromMenu(newLabelInput)"
       (input)="labelMenuError=''">
-    <div class="search-icon"></div>
   </div>
   @if (newLabelInput.value.trim().length) {
     <div class="label-list create-label" (mousedown)="$event.preventDefault()" (click)="addLabelFromMenu(newLabelInput)">
