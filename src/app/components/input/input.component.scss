@@ -285,8 +285,9 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      color: #9aa0a6;
+      color: inherit;
       cursor: pointer;
+      opacity: 0.58;
       // Anchor for any absolutely-positioned overlay (e.g. the transparent
       // <input type="date"> sitting on the alarm icon).
       position: relative;
@@ -300,8 +301,16 @@
         margin-right: 8px;
       }
 
+      &:active {
+        background: color-mix(in srgb, currentColor 12%, transparent);
+        border-radius: 50%;
+        opacity: 1;
+      }
+
       &.pin.pinned {
-        color: #fff;
+        color: inherit;
+        opacity: 0.9;
+
         .material-symbols-outlined {
           font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
         }
@@ -383,13 +392,9 @@
   }
 
   :host-context(.light-theme) {
-    .mobile-top-bar .mobile-icon,
     .mobile-bottom-bar .mobile-icon,
     .mobile-bottom-bar .timestamp {
       color: #5f6368;
-    }
-    .mobile-top-bar .mobile-icon.pin.pinned {
-      color: #202124;
     }
     .mobile-bottom-bar {
       border-top-color: #e0e0e0;
